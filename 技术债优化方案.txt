@@ -1,0 +1,137 @@
+TTDesktop1.0 技术债优化方案
+============================
+记录时间：2026-06-06 04:17:11
+项目版本：v1.2.0
+项目路径：C:\Users\lidelei212\tt2.0\tt-electron
+
+
+一、renderer.js 拆分（第一优先级，最紧迫）
+------------------------------------------
+
+【问题】
+renderer.js 单文件 4535 行，工单数据管理、UI 渲染、自动接单调度、
+批量操作、PM拉取等所有业务逻辑全部堆在一起，维护和扩展成本极高。
+
+【目标目录结构】
+renderer/
+  core/                        ← 已有，继续沿用
+  sla/                         ← 已有
+  templates/                   ← 已有
+  tickets/
+    ticket-store.js            ← 工单数据层（fetch/merge/dedupe/index）
+    ticket-ui.js               ← 工单列表渲染（renderTicketList/renderTicketItem）
+    ticket-filter.js           ← 筛选/排序/分类逻辑
+    ticket-priority.js         ← 优先级设置（单条+批量）
+    ticket-pm.js               ← 按地区拉PM
+  scheduler/
+    auto-runner.js             ← 自动接单调度（running/busy/timer/countdown）
+  renderer.js                  ← 只剩启动入口 + bindEvents，目标 200 行
+
+【拆分策略】
+- 渐进式拆分，每次只移动一个职责域
+- 保持 window.TTDesktop 命名空间挂载方式不变
+- 不引入打包工具，改动风险极低
+- 每个文件控制在 300 行以内
+
+
+二、全局状态变量治理（第二优先级）
+------------------------------------------
+
+【问题】
+renderer.js 顶部约 20 个散落的全局 let 变量（running、busy、
+batchInProgress、priorityBatchAbort 等），任何地方都能直接读写，
+出 bug 时难以追踪。
+
+【改造方向】
+把相关状态收拢到各自模块的闭包内，对外只暴露 getter/setter 或事件。
+
+示例对比：
+
+  // 现在（危险）—— 任何地方 running = true 都不会有任何通知
+  let running = false;
+  let busy = false;
+
+  // 改后（可控）—— scheduler/auto-runner.js 内部
+  const state = { running: false, busy: false };
+  function setRunning(v) {
+    state.running = v;
+    TD.events.emit('scheduler:stateChange', state);
+  }
+
+【配套工作】
+实现一个极简 EventEmitter（约 20 行），各模块通过事件通信解耦，
+UI 响应状态变化而不是被直接调用。
+
+
+三、webview 操作健壮性（第三优先级）
+------------------------------------------
+
+【问题 1】脚本字符串拼接容易出转义 bug
+
+  // 现在（脆弱）
+  ttExecuteJavaScript(`document.querySelector('...').click()`);
+
+  // 改后（安全）—— 函数序列化注入
+  function clickPriorityOption(value) {
+    const el = document.querySelector(`[data-value="${value}"]`);
+    if (!el) throw new Error('element not found');
+    el.click();
+  }
+  ttExecuteJavaScript(`(${clickPriorityOption.toString()})('${value}')`);
+
+【问题 2】缺少操作超时保护
+TT 页面加载慢时会导致整个自动接单流程卡死。
+改造方向：给每个 executeJavaScript 调用包一层带超时的 Promise wrapper。
+
+
+四、配置与常量管理（第四优先级）
+------------------------------------------
+
+【问题 1】打包输出路径硬编码
+package.json 中 "output": "D:\\TT" 换台机器就报错。
+修复：改为相对路径 "output": "dist"
+
+【问题 2】DEFAULT_HANDLER 硬编码个人 MIS
+constants.js 中 DEFAULT_HANDLER: "wb_lidelei" 是个人账号，
+其他人使用时会默默用此 MIS 拉单，存在数据安全隐患。
+修复：首次启动时检测是否已配置，未配置则引导用户填写并持久化，
+      不再以个人 MIS 作为兜底默认值。
+
+
+五、API Token 自动感知（第五优先级）
+------------------------------------------
+
+【问题】
+Token 过期后需要用户手动更新 tt-api.local.json，体验差，
+日常维护成本高。
+
+【改造方向】
+1. API 返回 401/403 时自动弹出提示，引导用户重新获取 token
+2. 提供一键从 webview 当前 session 抓取 Authorization header 的能力
+   （webview 已登录 TT，可从 session 中读取，无需用户手动复制）
+
+
+六、暂不建议做的事
+------------------------------------------
+
+- 引入 Vue/React 重构渲染层：成本远大于收益，现有模块化拆分 +
+  事件总线方案完全够用，且零构建工具依赖是本项目优点。
+- 引入 TypeScript：等拆分稳定后再考虑，现阶段优先级低。
+
+
+七、建议推进顺序
+------------------------------------------
+
+阶段一（近期）：
+  1. 修复 package.json 打包路径硬编码
+  2. 修复 DEFAULT_HANDLER 硬编码问题
+  3. 开始拆分 renderer.js（从 ticket-store.js 数据层入手）
+
+阶段二（中期）：
+  4. 完成 tickets/ 和 scheduler/ 模块拆分
+  5. 引入极简 EventEmitter，治理全局状态变量
+
+阶段三（后期）：
+  6. webview 操作健壮性改造（超时保护 + 函数序列化注入）
+  7. API Token 自动感知
+

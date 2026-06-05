@@ -1,0 +1,370 @@
+================================================================
+  tt-electron 服务器方案：分发下载 / 自动更新 / 数据同步
+  生成时间：2026-06-06
+================================================================
+
+一、需求拆解
+----------------------------------------------------------------
+
+你提到的"服务器"实际上包含三件独立的事：
+
+  需求 1：分发下载
+    同事第一次安装，能从内网某个地址下载到最新安装包，
+    不需要找你要文件或者传企业微信/大象。
+
+  需求 2：自动更新
+    同事已经装好了，你发布新版本后，程序启动时自动检测
+    并提示/静默升级，不需要同事手动重装。
+
+  需求 3：数据同步
+    各个同事的配置（authorization token、username、
+    TARGET_RG_IDS 等）或者共享数据（如标题规范规则、
+    模板消息）能集中管理，不需要每人手动改文件。
+
+这三件事可以分阶段做，复杂度依次递增。
+
+
+二、整体架构图
+----------------------------------------------------------------
+
+  ┌─────────────────────────────────────────────────────┐
+  │                  你的内网服务器                       │
+  │                                                     │
+  │  ┌──────────────┐   ┌──────────────────────────┐   │
+  │  │  静态文件服务  │   │   Update API（Node.js）   │   │
+  │  │  (Nginx)     │   │   /api/latest-version     │   │
+  │  │              │   │   /api/shared-config      │   │
+  │  │  /releases/  │   │   /api/templates          │   │
+  │  │  *.exe       │   └──────────────────────────┘   │
+  │  │  latest.json │                                   │
+  │  └──────────────┘                                   │
+  └─────────────────────────────────────────────────────┘
+           ↑ 你 build 后上传                ↑ 读写
+           ↓ 同事下载/更新                  ↓ 客户端拉取
+  ┌─────────────────────────────────────────────────────┐
+  │              同事电脑（TTDesktop1.0）                 │
+  │                                                     │
+  │  启动时检查 /api/latest-version                      │
+  │  版本不同 → 弹窗提示 → 用户确认 → 下载新 exe → 安装  │
+  │  同时拉取 /api/shared-config → 合并到本地配置         │
+  └─────────────────────────────────────────────────────┘
+
+
+三、方案 A：最简方案（纯静态，1 小时搭好）
+----------------------------------------------------------------
+
+适合场景：只需要"让同事能下载到最新版"，暂不需要自动更新和配置同步。
+
+做法：
+  1. 在内网找一台能跑 HTTP 的机器（或者直接用你自己的电脑开一个
+     简单的 HTTP 服务），把 dist-fontfix/ 或 dist-portable/ 下的
+     安装包放进去。
+
+  2. 用 Node.js 一行命令起服务：
+       npx serve D:\TT --listen 8080
+     或者用 Python：
+       python -m http.server 8080 --directory D:\TT
+
+  3. 告诉同事访问 http://你的IP:8080 下载 exe 安装。
+
+  4. 每次你 build 新版本，覆盖目录里的文件，同事下次下载就是新版。
+
+缺点：同事不知道有新版，需要你主动通知；没有自动更新。
+
+
+四、方案 B：自动更新（推荐，electron-updater）
+----------------------------------------------------------------
+
+这是 Electron 生态的标准方案，electron-builder 已经内置支持，
+你的项目已经用了 electron-builder，改动量很小。
+
+4.1 服务器端需要什么
+  只需要一个能提供静态文件的 HTTP/HTTPS 服务，放以下文件：
+    - TTDesktop1.0 Setup x.x.x.exe          （安装包）
+    - TTDesktop1.0 Setup x.x.x.exe.blockmap （差量更新块映射）
+    - latest.yml                             （版本描述文件，builder 自动生成）
+
+  latest.yml 内容示例（builder 自动生成，无需手写）：
+    version: 1.3.0
+    files:
+      - url: TTDesktop1.0 Setup 1.3.0.exe
+        sha512: xxxxxx==
+        size: 75432100
+    path: TTDesktop1.0 Setup 1.3.0.exe
+    sha512: xxxxxx==
+    releaseDate: '2026-06-06T10:00:00.000Z'
+
+4.2 package.json 改动（约 5 行）
+  在 "build" 节点里加：
+
+    "publish": {
+      "provider": "generic",
+      "url": "http://你的内网IP:8080/releases/"
+    }
+
+  完整 build 节点示例：
+    "build": {
+      "appId": "com.ttdesktop.app",
+      "productName": "TTDesktop1.0",
+      "directories": { "output": "D:\\TT" },
+      "publish": {
+        "provider": "generic",
+        "url": "http://192.168.x.x:8080/releases/"
+      },
+      "files": [ ... ],
+      "win": { "target": "nsis", "icon": "assets/cat.png" },
+      "nsis": { ... }
+    }
+
+4.3 main.js 改动（约 30 行）
+  安装 electron-updater：
+    npm install electron-updater --save
+
+  在 main.js 中加入更新检查逻辑：
+
+    const { autoUpdater } = require("electron-updater");
+
+    // 关闭自动下载，改为用户确认后再下载
+    autoUpdater.autoDownload = false;
+    autoUpdater.autoInstallOnAppQuit = true;
+
+    // 检查更新（在 app ready 后调用）
+    function checkForUpdates() {
+      autoUpdater.checkForUpdates().catch(() => {});
+    }
+
+    autoUpdater.on("update-available", (info) => {
+      // 弹窗询问用户是否更新
+      dialog.showMessageBox(mainWindow, {
+        type: "info",
+        title: "发现新版本",
+        message: `TTDesktop1.0 有新版本 v${info.version} 可用`,
+        detail: "是否立即下载并更新？更新完成后需要重启程序。",
+        buttons: ["立即更新", "稍后再说"],
+        defaultId: 0
+      }).then(({ response }) => {
+        if (response === 0) {
+          autoUpdater.downloadUpdate();
+        }
+      });
+    });
+
+    autoUpdater.on("download-progress", (progress) => {
+      // 可以把进度发给渲染进程显示
+      mainWindow?.webContents.send("update-download-progress", progress.percent);
+    });
+
+    autoUpdater.on("update-downloaded", () => {
+      dialog.showMessageBox(mainWindow, {
+        type: "info",
+        title: "更新已就绪",
+        message: "新版本已下载完成，重启后生效。",
+        buttons: ["立即重启", "稍后重启"],
+        defaultId: 0
+      }).then(({ response }) => {
+        if (response === 0) {
+          autoUpdater.quitAndInstall();
+        }
+      });
+    });
+
+    autoUpdater.on("error", (err) => {
+      // 静默失败，不打扰用户
+      console.error("自动更新失败：", err.message);
+    });
+
+4.4 发布流程（每次发新版）
+  1. 修改 package.json 中的 version（如 1.2.0 → 1.3.0）
+  2. 运行 npm run dist
+  3. 把 D:\TT\ 下的 *.exe、*.exe.blockmap、latest.yml
+     上传到服务器的 /releases/ 目录
+  4. 完成，同事下次启动程序会自动收到提示
+
+4.5 差量更新说明
+  electron-builder 生成的 .blockmap 文件支持差量下载，
+  如果只改了业务代码（renderer/），实际下载量可能只有
+  几百 KB，而不是完整的 70MB+ 安装包。
+
+
+五、方案 C：共享配置同步
+----------------------------------------------------------------
+
+5.1 需求分析
+  当前每个同事需要手动配置 tt-api.local.json，里面有：
+    - authorization：每人不同（个人 TT API token），不能共享
+    - username：每人不同
+    - env：可以统一
+
+  真正适合共享同步的数据是：
+    - 标题规范规则（TICKET_CATEGORY_RULES）
+    - 模板消息（defaultMessage / defaultMessageEn）
+    - 目标 RG 列表（TARGET_RG_IDS）
+    - 标题巡检关键词列表（titlePatrolList）
+
+  这些数据目前硬编码在 constants.js 或存在 localStorage，
+  如果你改了规则，同事需要重装才能生效。
+
+5.2 服务器端 API（Node.js，约 50 行）
+  新建一个极简的 Node.js HTTP 服务（不需要框架）：
+
+    // server/update-server.js
+    const http = require("http");
+    const fs = require("fs");
+    const path = require("path");
+
+    const PORT = 8080;
+    const RELEASES_DIR = path.join(__dirname, "releases");
+    const CONFIG_FILE = path.join(__dirname, "shared-config.json");
+
+    http.createServer((req, res) => {
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Content-Type", "application/json");
+
+      // 静态文件下载（安装包）
+      if (req.url.startsWith("/releases/")) {
+        const file = path.join(RELEASES_DIR, req.url.replace("/releases/", ""));
+        if (fs.existsSync(file)) {
+          res.setHeader("Content-Type", "application/octet-stream");
+          fs.createReadStream(file).pipe(res);
+          return;
+        }
+        res.writeHead(404); res.end("{}");
+        return;
+      }
+
+      // 共享配置读取
+      if (req.url === "/api/shared-config" && req.method === "GET") {
+        const cfg = fs.existsSync(CONFIG_FILE)
+          ? fs.readFileSync(CONFIG_FILE, "utf8")
+          : "{}";
+        res.end(cfg);
+        return;
+      }
+
+      res.writeHead(404); res.end("{}");
+    }).listen(PORT, () => {
+      console.log(`TTDesktop 更新服务已启动：http://0.0.0.0:${PORT}`);
+    });
+
+5.3 shared-config.json 示例
+  {
+    "version": "2026-06-06",
+    "titlePatrolList": ["故障", "无法登录", "网络异常"],
+    "targetRgIds": [12345, 67890],
+    "templates": {
+      "defaultMessage": "您好，您的工单已收到...",
+      "defaultMessageEn": "Hello, your ticket has been received..."
+    },
+    "categoryRules": [
+      { "label": "网络故障", "keywords": ["断网", "无法上网"] },
+      { "label": "账号问题", "keywords": ["密码", "登录失败"] }
+    ]
+  }
+
+5.4 客户端拉取（main.js 改动，约 20 行）
+  在 app ready 后，启动时拉取一次共享配置：
+
+    async function fetchSharedConfig() {
+      try {
+        const res = await fetch("http://192.168.x.x:8080/api/shared-config");
+        if (!res.ok) return;
+        const cfg = await res.json();
+        // 写入 userData 目录，renderer 启动时读取
+        const cfgPath = path.join(app.getPath("userData"), "shared-config.json");
+        fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2), "utf8");
+      } catch {
+        // 服务器不可达时静默失败，使用本地缓存
+      }
+    }
+
+  renderer 端在 constants.js 初始化时，优先读取
+  userData/shared-config.json，没有则 fallback 到硬编码默认值。
+
+5.5 个人 token 不共享的处理
+  authorization 和 username 仍然保留在本地 tt-api.local.json，
+  不上传服务器。共享配置只包含"团队公共数据"。
+  这样既保证了安全性，又实现了规则的集中管理。
+
+
+六、方案 D：Web 管理后台（长期目标）
+----------------------------------------------------------------
+
+如果团队规模扩大，可以在服务器上加一个简单的 Web 页面，
+让你直接在浏览器里编辑 shared-config.json，而不需要 SSH 上去改文件。
+
+技术选型建议：
+  - 后端：Node.js + Express（约 100 行）
+  - 前端：单个 HTML 文件 + 原生 JS（与 tt-electron 风格一致）
+  - 认证：简单的 Basic Auth 或固定密码（内网使用，安全要求不高）
+
+功能：
+  - 查看/编辑标题规范规则
+  - 查看/编辑模板消息
+  - 上传新版本安装包
+  - 查看各客户端最后一次拉取配置的时间（可选）
+
+
+七、实施路线图
+----------------------------------------------------------------
+
+  阶段 1（本周，1-2 小时）：
+    ✅ 搭建静态文件服务（方案 A）
+    ✅ 同事可以从内网地址下载安装包
+    工作量：在一台内网机器上运行 npx serve，上传安装包
+
+  阶段 2（下周，半天）：
+    ✅ 接入 electron-updater（方案 B）
+    ✅ 程序启动时自动检测新版本并提示更新
+    工作量：package.json 加 5 行，main.js 加 30 行，npm install
+
+  阶段 3（按需，1 天）：
+    ✅ 搭建共享配置 API（方案 C）
+    ✅ 标题规则、模板消息集中管理，改一处全员生效
+    工作量：写 server.js（50 行），改 main.js（20 行），
+            改 constants.js 加载逻辑（20 行）
+
+  阶段 4（长期，按需）：
+    ✅ Web 管理后台（方案 D）
+
+
+八、服务器选型建议
+----------------------------------------------------------------
+
+  选项 1：用你自己的开发机（最简单）
+    - 优点：零成本，立即可用
+    - 缺点：你关机了同事就访问不到
+    - 适合：阶段 1 验证阶段
+
+  选项 2：申请一台内网 Linux 虚拟机
+    - 联系 IT 申请一台低配 VM（2C4G 足够）
+    - 用 PM2 守护 Node.js 进程，开机自启
+    - 适合：正式使用
+
+  选项 3：美团内部 PaaS 平台（如 Mach/Hulk）
+    - 如果公司有内部容器平台，可以把 server.js 打包成 Docker 镜像部署
+    - 适合：有运维支持的情况
+
+  选项 4：学城/内部 OSS 对象存储
+    - 只做文件分发（方案 A），不需要 API 服务
+    - 把安装包上传到内部 OSS，生成下载链接分享给同事
+    - 适合：只需要解决"下载"问题，不需要自动更新
+
+
+九、安全注意事项
+----------------------------------------------------------------
+
+  1. authorization token 绝对不能上传服务器
+     每人的 TT API token 只存在本地 tt-api.local.json，
+     服务器只存团队公共配置。
+
+  2. 服务器只开内网访问
+     不要把更新服务器暴露到公网，只在公司内网或 VPN 内访问。
+
+  3. 安装包完整性校验
+     electron-updater 会自动校验 sha512，防止下载到损坏的文件。
+
+  4. 如果用 Web 管理后台，加访问密码
+     即使是内网，也建议加一个简单的 Basic Auth，
+     防止同事误操作修改配置。
+
+================================================================

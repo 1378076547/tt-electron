@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>TTDesktop1.0 桌面版</title>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; frame-src https://tt.sankuai.com https://*.sankuai.com;" />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="top-bar">
+        <div class="title-group">
+          <span class="title">TTDesktop1.0</span>
+          <span id="appVersionBadge" class="app-version-badge" aria-label="应用版本"></span>
+        </div>
+        <div class="controls">
+          <span id="ticketCount" class="ticket-count">待处理：—</span>
+          <span id="ticketSlaHeaderBadge" class="ticket-sla-header-badge" hidden aria-live="polite"></span>
+          <span id="nextTick" class="countdown">距下次检查：—</span>
+          <label class="field">
+            <span class="label">处理人 MIS</span>
+            <input id="handlerInput" type="text" placeholder="wb_lidelei" />
+          </label>
+          <label class="field">
+            <span class="label">间隔（秒）</span>
+            <input id="intervalInput" type="number" min="3" max="300" value="30" />
+          </label>
+          <label class="checkbox">
+            <input id="autoGroupInput" type="checkbox" />
+            <span>自动建群</span>
+          </label>
+          <label class="checkbox">
+            <input id="autoSendMessageInput" type="checkbox" />
+            <span>自动发送话术</span>
+          </label>
+          <label class="checkbox" title="规范顺序：事业部→地区→站/仓名→问题；须含四品牌之一且前缀后出现站/仓/店等；不打开 TT；与「开始」不冲突">
+            <input id="titlePatrolLogInput" type="checkbox" />
+            <span>标题巡检（仅日志）</span>
+          </label>
+          <label class="checkbox" title="须先点「开始」；刷新列表后发现新工单时自动检测并改标题（逐条确认写入）">
+            <input id="titleOnNewAutoInput" type="checkbox" />
+            <span>来单改标题（随开始）</span>
+          </label>
+          <label class="start-switch" title="开启/停止自动接单处理">
+            <input id="startBtn" type="checkbox" class="start-switch-input" aria-label="自动处理开关" />
+            <span class="start-switch-track" aria-hidden="true">
+              <span class="start-switch-thumb"></span>
+            </span>
+            <span class="start-switch-label" id="startSwitchLabel">关</span>
+          </label>
+        </div>
+      </header>
+
+      <main class="main-layout">
+        <section class="log-panel">
+          <div class="left-tabs">
+            <button id="tabLogsBtn" class="left-tab left-tab-active" type="button">执行日志</button>
+            <button id="tabTicketsBtn" class="left-tab" type="button">工单</button>
+            <button id="tabTemplatesBtn" class="left-tab" type="button">话术</button>
+            <div class="left-tabs-spacer"></div>
+            <button id="openLogsDirBtn" class="left-tab-action" type="button">打开日志</button>
+          </div>
+
+          <div id="panelLogs" class="left-panel left-panel-active">
+            <div id="logList" class="log-list">
+              <div class="log-item log-item-muted">Electron 版本 UI 已启动，正在等待自动接单配置。</div>
+            </div>
+          </div>
+
+          <div id="panelTickets" class="left-panel">
+            <div class="ticket-toolbar">
+              <div class="ticket-toolbar-controls">
+                <div class="ticket-sort-block" aria-label="排序选项">
+                  <span class="ticket-sort-label">排序</span>
+                  <div class="ticket-sort-buttons">
+                    <button id="prioritySortBtn" class="ticket-sort-btn" type="button">优先级：高→低</button>
+                    <button id="createdSortBtn" class="ticket-sort-btn" type="button">创建时间：新→旧</button>
+                  </div>
+                </div>
+                <div class="ticket-filter-block" aria-label="标题分类筛选">
+                  <span class="ticket-sort-label">筛选</span>
+                  <div class="ticket-filter-controls">
+                    <input id="ticketTitleSearchInput" class="ticket-filter-input" type="text" placeholder="按标题关键词筛选，如：监控" />
+                    <select id="ticketCategorySelect" class="ticket-toolbar-select" title="按标题分类筛选">
+                      <option value="all">全部（0）</option>
+                      <option value="monitor">监控类（0）</option>
+                      <option value="printer">打印类（0）</option>
+                      <option value="network">网络类（0）</option>
+                      <option value="pda">PDA类（0）</option>
+                      <option value="other">其他（0）</option>
+                    </select>
+                  </div>
+                  <div class="ticket-filter-toggles">
+                    <label class="ticket-filter-check">
+                      <input id="ticketOnlyMineInput" type="checkbox" checked />
+                      <span>仅看我的</span>
+                    </label>
+                    <label class="ticket-filter-check">
+                      <input id="ticketHideClosedInput" type="checkbox" checked />
+                      <span>隐藏已关闭</span>
+                    </label>
+                  </div>
+                </div>
+                <div class="ticket-action-buttons">
+                  <button id="ticketRefreshBtn" class="ticket-toolbar-action ticket-toolbar-action--accent" type="button">刷新</button>
+                  <button id="ticketTitlePatrolBtn" class="ticket-toolbar-action" type="button" title="列表粗检：事业部→地区→站/仓名→问题；不打开 TT，结果写入执行日志">
+                    标题巡检
+                  </button>
+                  <select
+                    id="ticketPrioritySelect"
+                    class="ticket-toolbar-select"
+                    title="修改当前选中工单优先级（会操作 TT 详情页）"
+                  >
+                    <option value="非常紧急">非常紧急（S1）</option>
+                    <option value="紧急">紧急（S2）</option>
+                    <option value="高" selected>高（S3）</option>
+                    <option value="中">中（S4）</option>
+                    <option value="低">低（S5）</option>
+                  </select>
+                  <button
+                    id="ticketPriorityApplyBtn"
+                    class="ticket-toolbar-action"
+                    type="button"
+                    title="对当前选中工单写入优先级（会操作 TT 详情页）"
+                  >
+                    设置优先级
+                  </button>
+                  <button id="ticketTitleNormalizeBtn" class="ticket-toolbar-action" type="button">标题检测</button>
+                  <button
+                    id="ticketTitleOnNewBtn"
+                    class="ticket-toolbar-action ticket-toolbar-action--accent"
+                    type="button"
+                    title="须先点顶部「开始」；仅处理本次开始后新出现的待处理工单，检测后确认写入"
+                  >
+                    来单改标题
+                  </button>
+                  <button id="pmCsvSelectBtn" class="ticket-toolbar-action" type="button" title="选择地区-MIS 对照表（CSV）">
+                    选择PM配置
+                  </button>
+                  <button id="pmPullByRegionBtn" class="ticket-toolbar-action ticket-toolbar-action--accent" type="button" title="先在左侧列表点击目标工单，再点此：按发起人路径/标题匹配地区，向大象群批量添加 PM">
+                    按地区拉PM
+                  </button>
+                </div>
+              </div>
+              <div class="ticket-pm-csv-hint" id="pmCsvPathLabel" aria-live="polite">PM配置：未选择</div>
+              <div class="ticket-batch-bar" aria-label="批量优先级">
+                <button id="ticketBatchSelectVisibleBtn" class="ticket-batch-btn" type="button" title="勾选当前筛选结果中的全部工单">
+                  全选可见
+                </button>
+                <button id="ticketBatchClearSelectionBtn" class="ticket-batch-btn" type="button" title="清空已勾选">
+                  清空选择
+                </button>
+                <span id="ticketBatchSelectedCount" class="ticket-batch-count">已选 0</span>
+                <label class="ticket-filter-check" title="打开后，每次刷新工单列表会自动扫描标题命中关键词并批量升到高(S3)">
+                  <input id="ticketAutoPriorityBoostToggle" type="checkbox" />
+                  <span>自动升高(S3)</span>
+                </label>
+                <button
+                  id="ticketAutoPriorityBoostBtn"
+                  class="ticket-batch-btn"
+                  type="button"
+                  title="扫描当前可见工单标题，命中关键词（网络卡顿/断电/没网）则自动勾选，并批量设置为「高(S3)」"
+                >
+                  关键词升高优先级
+                </button>
+                <button
+                  id="ticketPriorityBatchBtn"
+                  class="ticket-toolbar-action ticket-toolbar-action--accent"
+                  type="button"
+                  title="按上方下拉值，顺序对勾选工单设置优先级（仅当前筛选列表内已勾选的项）"
+                >
+                  批量设置优先级
+                </button>
+                <button id="ticketPriorityBatchStopBtn" class="ticket-batch-btn ticket-batch-btn--stop" type="button" disabled title="中断正在进行的批量设置">
+                  停止批量
+                </button>
+                <label class="ticket-filter-check" title="创建满 40 小时预警（即将48h）、满 48 小时超时（已超48h）；未处理/处理中/暂停中工单">
+                  <input id="ticketSlaReminderToggle" type="checkbox" checked />
+                  <span>48h时效提醒</span>
+                </label>
+                <label class="ticket-filter-check" title="需系统允许通知；与执行日志同时提醒">
+                  <input id="ticketSlaNotifyToggle" type="checkbox" />
+                  <span>Windows通知</span>
+                </label>
+              </div>
+              <div id="ticketSlaSummary" class="ticket-sla-summary" hidden aria-live="polite"></div>
+              <div class="ticket-toolbar-footer">
+                <span class="ticket-updated">
+                  最后更新：<span id="ticketLastUpdated">—</span>
+                </span>
+                <span class="ticket-count-inline">
+                  已加载：<span id="ticketLoadedCount">0</span>
+                </span>
+              </div>
+            </div>
+
+            <div id="ticketList" class="ticket-list" role="list"></div>
+          </div>
+
+          <div id="panelTemplates" class="left-panel">
+            <div class="templates-toolbar">
+              <div class="templates-title">话术模板（关键词匹配）</div>
+              <div class="templates-actions">
+                <button id="templatesAddRuleBtn" class="secondary-btn" type="button">新增规则</button>
+                <button id="templatesSaveBtn" class="primary-btn" type="button">保存</button>
+              </div>
+            </div>
+            <div class="templates-body">
+              <label class="templates-field">
+                <div class="templates-label">中文默认话术（兜底）</div>
+                <textarea id="defaultMessageTextarea" class="templates-textarea" rows="3" placeholder="未命中规则且标题含中文时发送；也可作最终兜底"></textarea>
+              </label>
+
+              <label class="templates-field">
+                <div class="templates-label">英文默认话术（兜底）</div>
+                <textarea id="defaultMessageEnTextarea" class="templates-textarea" rows="3" placeholder="未命中规则且标题含英文时发送"></textarea>
+              </label>
+
+              <div class="templates-field">
+                <div class="templates-label">试匹配</div>
+                <div class="templates-help">先在工单列表选中一条，再点击下方按钮，在执行日志查看将发送的话术来源。</div>
+                <button id="templatesPreviewBtn" class="secondary-btn" type="button">用当前工单标题试匹配</button>
+              </div>
+
+              <div class="templates-field">
+                <div class="templates-label">规则列表</div>
+                <div class="templates-help">每条规则：上行“关键词列表”（逗号/分号分隔），下行“发送话术”。从上到下优先匹配，标题包含任一关键词即命中（忽略空格）。</div>
+                <div id="templatesRulesList" class="templates-rules-list" role="list"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section class="web-panel">
+          <div class="web-header web-header-tt">
+            <span>内置 TT 浏览器</span>
+            <span id="webviewLoadingHint" class="webview-loading-badge" aria-live="polite">TT 页面加载中…</span>
+          </div>
+          <webview id="ttWebview" class="web-frame" allowpopups></webview>
+        </section>
+      </main>
+    </div>
+
+    <script src="./core/constants.js"></script>
+    <script src="./core/dom.js"></script>
+    <script src="./core/log.js"></script>
+    <script src="./core/time-parse.js"></script>
+    <script src="./core/tt-bridge.js"></script>
+    <script src="./core/runtime-guard.js"></script>
+    <script src="./templates/templates.js"></script>
+    <script src="./sla/sla.js"></script>
+    <script src="./titlePatrolList.js"></script>
+    <script src="./titlePrefixEngine.js"></script>
+    <script src="./renderer.js"></script>
+  </body>
+  </html>
