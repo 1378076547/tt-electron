@@ -3,6 +3,7 @@ const path = require("path");
 const fs = require("fs");
 const https = require("https");
 const http = require("http");
+const { autoUpdater } = require("electron-updater");
 
 /** @type {BrowserWindow | null} */
 let mainWindow = null;
@@ -336,6 +337,7 @@ app.whenReady().then(() => {
   setupElephantProtocolIntercept();
   createAppMenu();
   createWindow();
+  checkForUpdates();
 });
 
 function getLogFilePath() {
@@ -543,6 +545,70 @@ ipcMain.handle("tt-api-ticket-detail", async (_event, payload) => {
     return { ok: false, message: err instanceof Error ? err.message : String(err) };
   }
 });
+
+// ─── 自动更新 ────────────────────────────────────────────────────────────────
+// 不自动下载，让用户自己决定是否更新
+autoUpdater.autoDownload = false;
+// 退出时自动安装已下载的更新
+autoUpdater.autoInstallOnAppQuit = true;
+
+// 发现新版本 → 弹窗询问用户
+autoUpdater.on("update-available", (info) => {
+  if (!mainWindow) return;
+  dialog.showMessageBox(mainWindow, {
+    type: "info",
+    title: "发现新版本",
+    message: `TTDesktop1.0 有新版本 v${info.version} 可用`,
+    detail: "是否立即下载并更新？下载完成后重启程序即可生效，不影响当前使用。",
+    buttons: ["立即更新", "稍后再说"],
+    defaultId: 0,
+    cancelId: 1
+  }).then(({ response }) => {
+    if (response === 0) {
+      autoUpdater.downloadUpdate();
+    }
+  });
+});
+
+// 没有新版本 → 静默，不打扰用户
+autoUpdater.on("update-not-available", () => {});
+
+// 下载进度 → 发给渲染进程（可选，用于显示进度条）
+autoUpdater.on("download-progress", (progress) => {
+  mainWindow?.webContents.send("update-download-progress", Math.floor(progress.percent));
+});
+
+// 下载完成 → 提示重启
+autoUpdater.on("update-downloaded", () => {
+  if (!mainWindow) return;
+  dialog.showMessageBox(mainWindow, {
+    type: "info",
+    title: "更新已就绪",
+    message: "新版本已下载完成！",
+    detail: "立即重启程序以完成更新，或稍后手动重启。",
+    buttons: ["立即重启", "稍后重启"],
+    defaultId: 0,
+    cancelId: 1
+  }).then(({ response }) => {
+    if (response === 0) {
+      allowQuit = true;
+      autoUpdater.quitAndInstall();
+    }
+  });
+});
+
+// 更新出错 → 静默失败，不影响正常使用
+autoUpdater.on("error", () => {});
+
+// 检查更新（仅打包后的正式版本才检查，开发模式跳过）
+function checkForUpdates() {
+  if (!app.isPackaged) return;
+  // 延迟 5 秒再检查，避免与启动时的 TT 页面加载争抢资源
+  setTimeout(() => {
+    autoUpdater.checkForUpdates().catch(() => {});
+  }, 5000);
+}
+// ─────────────────────────────────────────────────────────────────────────────
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {

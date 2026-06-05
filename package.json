@@ -1,6 +1,6 @@
 {
   "name": "ttdesktop-electron",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "TTDesktop1.0 - Electron high-fidelity desktop client for TT 自动接单",
   "main": "main.js",
   "scripts": {
@@ -27,6 +27,12 @@
       "tt-api.local.json.example",
       "package.json"
     ],
+    "publish": {
+      "provider": "github",
+      "owner": "1378076547",
+      "repo": "tt-electron",
+      "private": true
+    },
     "win": {
       "target": "nsis",
       "icon": "assets/cat.png"
@@ -38,6 +44,8 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true
     }
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.3"
   }
 }
-
