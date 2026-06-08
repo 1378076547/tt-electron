@@ -1,4 +1,4 @@
-﻿const TD = window.TTDesktop;
+const TD = window.TTDesktop;
 const C = TD.constants;
 const {
   DEFAULT_HANDLER,
@@ -139,6 +139,9 @@ const {
   renderTicketList,
   refreshTickets,
   handleTicketClick,
+  syncActiveHighlightFromDom,
+  startApiTicketPollTimer,
+  stopApiTicketPollTimer,
   loadMoreTickets,
   updateTicketMeta,
   syncSortButtonText
@@ -170,7 +173,7 @@ const { isPullInProgress, updatePmCsvPathLabel, selectPmCsvFile, runPmPullByRegi
  * - 无发起人架构 → 不改；词典 assets/china_cities.json。
  * - 外显顺序：事业部（品牌）→ 地区（城市）→ 站点名或仓名 → 原标题/问题简述。
  * - 引擎格式：{事业部简称}{城市}{站点/仓/店名}+原标题正文；站/仓/店优先从架构路径解析，其次仓库/门店字段。
- * - 「来单改标题」须先「开始」；仅处理开始后新出现的待处理单（含转单），确认后写入。
+ * - 「来单改标题」须先「开始」；仅处理开始后新出现的待处理单（含转单），检测通过后自动写入。
  * - 「标题巡检」逻辑独立在 titlePatrolList.js（TTTitlePatrolList.patrolListTitles）；「标题检测」在 titlePrefixEngine.js（TTTitlePrefix）。
  */
 
@@ -241,12 +244,16 @@ function updateNextTickDisplay() {
   nextTickEl.textContent = `距下次检查：${remaining}s`;
 }
 
+let lastPendingCount = NaN;
+
 function updateTicketCount(count) {
   if (!ticketCountEl) return;
   if (typeof count !== "number" || Number.isNaN(count) || count < 0) {
+    lastPendingCount = NaN;
     ticketCountEl.textContent = "待处理：—";
     return;
   }
+  lastPendingCount = count;
   ticketCountEl.textContent = `待处理：${count}`;
 }
 
@@ -1360,8 +1367,7 @@ function bindEvents() {
     setWebviewLoadingHint(false);
     log("TT 页面已加载完成。", "success");
     scheduleGuestIdleWork(async () => {
-      await refreshPendingCount();
-      await refreshTickets({ reset: true });
+      await onTtPageLifecycle({ reset: true });
     });
   });
 
@@ -1372,8 +1378,7 @@ function bindEvents() {
   ttWebview.addEventListener("did-stop-loading", () => {
     webviewReady = true;
     scheduleGuestIdleWork(async () => {
-      await refreshPendingCount();
-      await refreshTickets({ reset: false });
+      await onTtPageLifecycle({ reset: false });
       if (running && pendingRunAfterReload) {
         pendingRunAfterReload = false;
         const result = await runCheck();
@@ -1444,6 +1449,32 @@ async function applyAppVersionDisplay() {
   }
 }
 
+async function onTtPageLifecycle({ reset = false } = {}) {
+  await refreshPendingCount();
+  try {
+    const st = await window.ttDesktopApi?.getTtApiConfigStatus?.();
+    if (st?.ok) {
+      if (reset) await refreshTickets({ reset: true });
+      else await syncActiveHighlightFromDom();
+      return;
+    }
+  } catch {
+    // ignore
+  }
+  await refreshTickets({ reset });
+}
+
+async function setupApiTicketPolling() {
+  try {
+    const st = await window.ttDesktopApi?.getTtApiConfigStatus?.();
+    if (!st?.ok) return;
+    startApiTicketPollTimer();
+    log("工单列表：API 为主，每 30 秒自动拉单；DOM 仅用于高亮与点击跳转。", "info");
+    await refreshTickets({ reset: true, apiOnly: true });
+  } catch {
+    // ignore
+  }
+}
 async function logTtApiConfigStatus() {
   try {
     const st = await window.ttDesktopApi?.getTtApiConfigStatus?.();
@@ -1495,6 +1526,11 @@ function bindModuleDeps() {
   TD.tickets.bind({
     sleep,
     getHandler,
+    getPendingCount: () => lastPendingCount,
+    isApiConfigured: async () => {
+      const st = await window.ttDesktopApi?.getTtApiConfigStatus?.();
+      return !!st?.ok;
+    },
     getWebviewReady: () => webviewReady,
     getTtWebview: () => ttWebview,
     isTicketBatchSelected,
@@ -1556,7 +1592,7 @@ function init() {
   syncSortButtonText();
   bindEvents();
   void applyAppVersionDisplay();
-  void logTtApiConfigStatus();
+  void logTtApiConfigStatus().then(() => setupApiTicketPolling());
   ensureTicketElapsedTimer();
   restartTitlePatrolTimer();
 }

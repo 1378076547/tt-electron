@@ -39,9 +39,16 @@
   let ticketOnlyMine = true;
   let ticketHideClosed = true;
 
+  /** API 已配置时的独立拉单间隔（不依赖 TT 页面 F5） */
+  const API_TICKET_POLL_MS = 30000;
+  /** @type {ReturnType<typeof setInterval> | null} */
+  let apiTicketPollTimer = null;
+
   let deps = {
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     getHandler: () => "",
+    getPendingCount: () => NaN,
+    isApiConfigured: async () => false,
     getWebviewReady: () => false,
     getTtWebview: () => null,
     isTicketBatchSelected: () => false,
@@ -65,12 +72,127 @@
     return deps.getHandler();
   }
 
+async function isApiPrimaryMode() {
+  try {
+    return !!(await deps.isApiConfigured?.());
+  } catch {
+    return false;
+  }
+}
+
+function buildFetchActiveIdScript() {
+  return `
+    (() => {
+      function norm(text) { return ((text || '').trim()).replace(/\\s+/g, ' '); }
+      function parseTicketNoFromRoot(root) {
+        const scope = root || document;
+        const items = Array.from(scope.querySelectorAll('.info-item'));
+        for (const it of items) {
+          const label = norm(it.querySelector('.info-label')?.textContent || '');
+          if (!label.includes('编号')) continue;
+          const val = norm(it.querySelector('.info-text')?.textContent || '');
+          const m = val.match(/\\d{6,}/);
+          if (m) return m[0];
+        }
+        const m2 = norm(scope.textContent || '').match(/编号\\s*[:：]\\s*(\\d{6,})/);
+        return m2 ? m2[1] : '';
+      }
+      const detail =
+        document.querySelector('#ticket-detail') ||
+        document.querySelector('.ticket-detail-container') ||
+        document.querySelector('.detail-with-list-container');
+      return detail ? parseTicketNoFromRoot(detail) : '';
+    })();
+  `;
+}
+
+async function fetchActiveIdFromDom() {
+  if (!deps.getWebviewReady() || !deps.getTtWebview()) return "";
+  try {
+    const raw = await ttExecuteJavaScript(buildFetchActiveIdScript());
+    return normalizeTicketId(raw) || "";
+  } catch {
+    return "";
+  }
+}
+
+async function syncActiveHighlightFromDom() {
+  const activeId = await fetchActiveIdFromDom();
+  if (activeId) syncTicketActiveState(activeId);
+}
+
+function applyActiveIdToTickets(activeId) {
+  const normActive = normalizeTicketId(activeId);
+  if (normActive) {
+    for (const t of tickets) {
+      t.isActive = normalizeTicketId(t.id) === normActive;
+    }
+    return;
+  }
+  let found = false;
+  for (const t of tickets) {
+    if (t.isActive && !found) found = true;
+    else if (t.isActive && found) t.isActive = false;
+  }
+}
+
+function rebuildTicketIndex() {
+  ticketIndex = new Map();
+  for (const t of tickets) {
+    const id = normalizeTicketId(t.id);
+    if (id) ticketIndex.set(`id:${id}`, t);
+  }
+}
+
+function stopApiTicketPollTimer() {
+  if (apiTicketPollTimer) {
+    clearInterval(apiTicketPollTimer);
+    apiTicketPollTimer = null;
+  }
+}
+
+function startApiTicketPollTimer() {
+  stopApiTicketPollTimer();
+  apiTicketPollTimer = setInterval(() => {
+    void refreshTickets({ apiOnly: true }).catch(() => {});
+  }, API_TICKET_POLL_MS);
+}
+
+/**
+ * TT 工单唯一编号：API 字段 id 与详情 DOM「编号」为同一值（如 337676282）。
+ * @param {unknown} raw
+ * @returns {string | null}
+ */
+function normalizeTicketId(raw) {
+  if (raw == null) return null;
+  const s = String(raw).trim();
+  if (!s) return null;
+  if (/^\d{6,}$/.test(s)) return s;
+  const m = s.match(/\d{6,}/);
+  return m ? m[0] : null;
+}
+
 function makeStableKey(item) {
   const title = (item?.title || "").trim();
   const handler = (item?.handler || "").trim();
   const createdAtText = (item?.createdAtText || "").trim();
   // 列表里的时间（right-wrapper）在同一工单内通常稳定，点击/状态变化也不会变
   return `${title}|${handler}|${createdAtText}`;
+}
+
+function buildTicketFingerprint(item) {
+  const title = (item?.title || "").trim();
+  const handler = (item?.handler || "").trim();
+  const priorityText = (item?.priorityText || "").trim();
+  const epoch = ticketEpochMs(item) ?? parseCreatedAtEpoch(item?.createdAtText);
+  const timePart = epoch != null ? String(epoch) : (item?.createdAtText || "").trim();
+  return `${title}|${handler}|${priorityText}|${timePart}`;
+}
+
+/** 去重主键：API id === DOM 编号，TT 工单编号全局唯一 */
+function ticketDedupeKey(item) {
+  const id = normalizeTicketId(item?.id);
+  return id ? `id:${id}` : null;
 }
 
 function updateTicketMeta(visibleCount) {
@@ -96,88 +218,101 @@ function normalizeMis(raw) {
     .replace(/[^a-z0-9._-]/g, "");
 }
 
-/** 发起人展示里常见「姓名/mis」：优先用字段 MIS，否则从 handler 取斜杠后账号 */
-function resolveMisForDedupe(item) {
-  const a = normalizeMis(item?.ownerMis || "");
-  const b = normalizeMis(item?.assigneeMis || "");
-  if (a) return a;
-  if (b) return b;
-  return normalizeMis(item?.handler || "");
-}
-
-/** API 与 DOM 是否为同一工单（标题 + MIS + 创建时间接近） */
-function ticketsLikelySame(a, b) {
-  if (!a || !b) return false;
-  const idA = String(a.id || "").trim();
-  const idB = String(b.id || "").trim();
-  if (idA && idB && idA === idB) return true;
-  const tA = normalizeTicketTitleForMatch(a.title || "");
-  const tB = normalizeTicketTitleForMatch(b.title || "");
-  if (!tA || tA !== tB) return false;
-  const misA = resolveMisForDedupe(a);
-  const misB = resolveMisForDedupe(b);
-  if (misA && misB && misA !== misB) return false;
-  const eA = ticketEpochMs(a);
-  const eB = ticketEpochMs(b);
-  if (Number.isFinite(eA) && Number.isFinite(eB)) {
-    return Math.abs(eA - eB) <= 48 * 3600000;
+function mergeTicketRowFields(into, from) {
+  if (!into || !from) return into;
+  if (from.isActive) into.isActive = true;
+  if (from.statusText) {
+    into.statusText = from.statusText;
+    into.statusRank = from.statusRank;
   }
-  return makeStableKey(a) === makeStableKey(b);
-}
-
-function mergeApiDomTicketLists(apiMapped, domMapped) {
-  const merged = new Map();
-  const rows = [];
-  for (const t of apiMapped) {
-    normalizeTicketCreatedFields(t);
-    const k = t.id ? `id:${t.id}` : `fp:${t.fingerprint}`;
-    merged.set(k, t);
-    rows.push(t);
+  if (from.handler) into.handler = from.handler;
+  if (from.priorityText) {
+    into.priorityText = from.priorityText;
+    into.priorityRank = from.priorityRank;
   }
-  for (const t of domMapped) {
-    normalizeTicketCreatedFields(t);
-    if (t.id && merged.has(`id:${t.id}`)) continue;
-    if (rows.some((a) => ticketsLikelySame(a, t))) continue;
-    const k = t.id ? `id:${t.id}` : `fp:${t.fingerprint}`;
-    if (!merged.has(k)) {
-      merged.set(k, t);
-      rows.push(t);
-    }
-  }
-  return rows;
+  if (from.createdAtText) into.createdAtText = from.createdAtText;
+  if (from.ownerMis) into.ownerMis = from.ownerMis;
+  if (from.assigneeMis) into.assigneeMis = from.assigneeMis;
+  if (from.title) into.title = from.title;
+  const nid = normalizeTicketId(from.id);
+  if (nid) into.id = nid;
+  normalizeTicketCreatedFields(into);
+  into.fingerprint = buildTicketFingerprint(into);
+  return into;
 }
 
 /**
- * 去掉「无编号 DOM 行」：若存在同标题、时间接近、MIS 可对齐的「有编号」行，则视为 API+DOM 重复。
- * 典型现象：TT 列表里未解析出编号时，会与 API 各保留一条，计数翻倍。
- * @param {TicketItem[]} list
+ * API ∪ DOM：两边应是同一批工单；仅当编号 id 相同时合并为一条（API 与 DOM 各一条 → 展示一条）。
  */
-function dedupeNoIdWhenIdTwinExists(list) {
-  if (!Array.isArray(list) || list.length < 2) return list;
-  const withId = list.filter((t) => t && String(t.id || "").trim());
-  const withoutId = list.filter((t) => t && !String(t.id || "").trim());
-  if (!withId.length || !withoutId.length) return list;
+function unionApiDomTickets(apiRows, domRows) {
+  const byId = new Map();
 
-  const removeSk = new Set();
-  for (const w of withoutId) {
-    const wTitle = normalizeTicketTitleForMatch(w.title || "");
-    if (!wTitle) continue;
-    const wMis = resolveMisForDedupe(w);
-    const wE = ticketEpochMs(w);
-    for (const x of withId) {
-      if (normalizeTicketTitleForMatch(x.title || "") !== wTitle) continue;
-      const xMis = resolveMisForDedupe(x);
-      if (wMis && xMis && wMis !== xMis) continue;
-      const xE = ticketEpochMs(x);
-      const timeOk =
-        !Number.isFinite(wE) || !Number.isFinite(xE) || Math.abs(wE - xE) <= 48 * 3600000;
-      if (!timeOk) continue;
-      removeSk.add(makeStableKey(w));
-      break;
-    }
+  function ingest(row) {
+    if (!row) return;
+    const id = normalizeTicketId(row.id);
+    if (!id) return;
+    normalizeTicketCreatedFields(row);
+    row.fingerprint = buildTicketFingerprint(row);
+    const prev = byId.get(id);
+    if (prev) mergeTicketRowFields(prev, row);
+    else byId.set(id, { ...row });
   }
-  if (!removeSk.size) return list;
-  return list.filter((t) => !(!String(t.id || "").trim() && removeSk.has(makeStableKey(t))));
+
+  for (const t of apiRows || []) ingest(t);
+  for (const t of domRows || []) ingest(t);
+  return Array.from(byId.values());
+}
+
+/** 「仅看我的」时 API 行常缺 assignee 字段，补当前 MIS 避免被前端过滤掉 */
+function applyMineOwnerFallback(list) {
+  if (!ticketOnlyMine || !Array.isArray(list)) return list;
+  const me = String(getHandler() || "").trim();
+  if (!me) return list;
+  for (const t of list) {
+    if (!t) continue;
+    if (!t.ownerMis) t.ownerMis = me;
+    if (!t.assigneeMis) t.assigneeMis = me;
+  }
+  return list;
+}
+
+/** 刷新时保留缓存里仍有编号的工单，避免 TT 对焦单条后 DOM 只抓到 1 条把另一条覆盖掉 */
+function preserveTicketsMissingFromMapped(mapped) {
+  if (!Array.isArray(mapped)) return [];
+  const mappedIds = new Set(mapped.map((t) => normalizeTicketId(t?.id)).filter(Boolean));
+  const out = mapped.slice();
+  for (const t of tickets) {
+    const id = normalizeTicketId(t?.id);
+    if (!id || mappedIds.has(id)) continue;
+    const st = String(t?.statusText || "").trim();
+    if (ticketHideClosed && (st.includes("已关闭") || st.includes("已完成"))) continue;
+    out.push(t);
+    mappedIds.add(id);
+  }
+  return out;
+}
+
+function syncTicketActiveState(activeId) {
+  const normActive = normalizeTicketId(activeId);
+  for (const t of tickets) {
+    t.isActive = !!normActive && normalizeTicketId(t.id) === normActive;
+  }
+  renderTicketList();
+}
+
+/** 展示前去重：仅按 TT 编号 id */
+function dedupeTicketsForDisplay(list) {
+  if (!Array.isArray(list) || !list.length) return [];
+  const byId = new Map();
+  for (const t of list) {
+    if (!t) continue;
+    const id = normalizeTicketId(t.id);
+    if (!id) continue;
+    const prev = byId.get(id);
+    if (prev) mergeTicketRowFields(prev, t);
+    else byId.set(id, t);
+  }
+  return Array.from(byId.values());
 }
 
 function classifyTicketTitle(rawTitle) {
@@ -285,47 +420,6 @@ function parsePriorityRank(text) {
   return 9;
 }
 
-function buildLooseTicketKey(item) {
-  const title = normalizeTicketTitleForMatch(item?.title || "");
-  const mis = resolveMisForDedupe(item);
-  const ts = ticketEpochMs(item);
-  return `${title}|${mis}|${ts || ""}`;
-}
-
-/**
- * API 与 DOM 合并后、写入缓存前：同一工单常出现「一条有 id、一条无 id」或时间字段格式不同导致 fingerprint 不一致。
- * 先按 id 去重，再按宽松键去掉已无 id 的重复项，避免 mergeTickets 因索引键不一致插入两条。
- * @param {TicketItem[]} items
- * @returns {TicketItem[]}
- */
-function dedupeMappedTicketsBeforeMerge(items) {
-  if (!Array.isArray(items) || !items.length) return [];
-  const withId = items.filter((t) => t && t.id);
-  const withoutId = items.filter((t) => t && !t.id);
-  const idSeen = new Set();
-  const looseUsed = new Set();
-  const skUsed = new Set();
-  const out = [];
-
-  for (const t of withId) {
-    const id = String(t.id).trim();
-    if (!id || idSeen.has(id)) continue;
-    idSeen.add(id);
-    const loose = buildLooseTicketKey(t);
-    if (loose) looseUsed.add(loose);
-    out.push(t);
-  }
-  for (const t of withoutId) {
-    const loose = buildLooseTicketKey(t);
-    if (loose && looseUsed.has(loose)) continue;
-    const sk = makeStableKey(t);
-    if (skUsed.has(sk)) continue;
-    skUsed.add(sk);
-    if (loose) looseUsed.add(loose);
-    out.push(t);
-  }
-  return out;
-}
 
 function statusRank(text) {
   const t = (text || "").trim();
@@ -390,10 +484,14 @@ function sortTickets(list) {
 
 /** @param {TicketItem} item */
 function getTicketSelectKey(item) {
-  if (!item) return "";
-  if (item.id) return `id:${item.id}`;
-  const fp = item.fingerprint || "";
-  return fp ? `fp:${fp}` : "";
+  const id = normalizeTicketId(item?.id);
+  return id ? `id:${id}` : "";
+}
+
+function findMergeTarget(item) {
+  const id = normalizeTicketId(item?.id);
+  if (!id) return null;
+  return ticketIndex.get(`id:${id}`) || tickets.find((t) => normalizeTicketId(t.id) === id) || null;
 }
 
 function mergeTickets(nextItems, { reset = false } = {}) {
@@ -403,31 +501,17 @@ function mergeTickets(nextItems, { reset = false } = {}) {
   }
 
   for (const item of nextItems) {
-    normalizeTicketCreatedFields(item);
-    const idKey = item.id ? `id:${item.id}` : null;
-    const stableKey = `sk:${makeStableKey(item)}`;
-    const fpKey = `fp:${item.fingerprint}`;
+    const normId = normalizeTicketId(item.id);
+    if (!normId) continue;
 
-    // 先按 id 命中，其次按 fingerprint 命中（用于“点击后才拿到编号”的升级场景）
-    let existing =
-      (idKey ? ticketIndex.get(idKey) : null) ||
-      ticketIndex.get(stableKey) ||
-      ticketIndex.get(fpKey);
+    normalizeTicketCreatedFields(item);
+    const idKey = `id:${normId}`;
+
+    const existing = findMergeTarget(item);
     if (!existing) {
-      existing = tickets.find((t) => ticketsLikelySame(t, item)) || null;
-    }
-    if (!existing) {
-      const keyToUse = idKey || stableKey;
-      ticketIndex.set(keyToUse, item);
+      ticketIndex.set(idKey, item);
       tickets.push(item);
       continue;
-    }
-
-    // 如果之前是 fingerprint key，后来拿到了 id，则把索引升级到 idKey，避免产生重复项
-    if (idKey && !ticketIndex.has(idKey)) {
-      ticketIndex.delete(stableKey);
-      ticketIndex.delete(fpKey);
-      ticketIndex.set(idKey, existing);
     }
 
     existing.isActive = item.isActive;
@@ -440,7 +524,7 @@ function mergeTickets(nextItems, { reset = false } = {}) {
     existing.createdAtEpoch = resolveCreatedAtEpoch(item) ?? resolveCreatedAtEpoch(existing) ?? existing.createdAtEpoch;
     normalizeTicketCreatedFields(existing);
     existing.title = item.title || existing.title;
-    existing.id = item.id || existing.id;
+    existing.id = normalizeTicketId(item.id) || normalizeTicketId(existing.id) || existing.id;
     existing.fingerprint = item.fingerprint || existing.fingerprint;
   }
 }
@@ -462,7 +546,7 @@ function renderTicketList() {
     const row = document.createElement("div");
     row.className = `ticket-item${item.isActive ? " ticket-item-active" : ""}`;
     row.setAttribute("role", "listitem");
-    row.dataset.ticketId = item.id || "";
+    row.dataset.ticketId = normalizeTicketId(item.id) || "";
     row.dataset.fingerprint = item.fingerprint;
 
     const selectKey = getTicketSelectKey(item);
@@ -503,6 +587,12 @@ function renderTicketList() {
       elapsed.textContent = "已历时：—";
     }
     sub.append(handler, created, elapsed);
+    const ticketNo = normalizeTicketId(item.id);
+    if (ticketNo) {
+      const noEl = document.createElement("span");
+      noEl.textContent = `编号：${ticketNo}`;
+      sub.append(noEl);
+    }
 
     const badges = document.createElement("div");
     badges.className = "ticket-badges";
@@ -542,8 +632,9 @@ function renderTicketList() {
 
 function buildExtractTicketsScript() {
   return `
-    (() => {
+    (async () => {
       function norm(text) { return ((text || '').trim()).replace(/\\s+/g, ' '); }
+      function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
       function getListWrapper() {
         return (
@@ -587,6 +678,9 @@ function buildExtractTicketsScript() {
       function guessTime(item) {
         const direct =
           item.querySelector('.right-wrapper')?.textContent ||
+          item.querySelector('.time-wrap')?.textContent ||
+          item.querySelector('.ticket-time')?.textContent ||
+          item.querySelector('.list-time')?.textContent ||
           item.querySelector('.time')?.textContent ||
           item.querySelector('.create-time')?.textContent ||
           item.querySelector('.update-time')?.textContent ||
@@ -628,14 +722,10 @@ function buildExtractTicketsScript() {
         return norm(direct);
       }
 
-      function getActiveIdFromDetail() {
-        const detail =
-          document.querySelector('#ticket-detail') ||
-          document.querySelector('.ticket-detail-container') ||
-          document.querySelector('.detail-with-list-container');
-        if (!detail) return '';
-
-        const items = Array.from(detail.querySelectorAll('.info-item'));
+      /** API id 与详情「编号」同源：<span class="info-label">编号：</span><span class="info-text">337676282</span> */
+      function parseTicketNoFromRoot(root) {
+        const scope = root || document;
+        const items = Array.from(scope.querySelectorAll('.info-item'));
         for (const it of items) {
           const label = norm(it.querySelector('.info-label')?.textContent || '');
           if (!label.includes('编号')) continue;
@@ -643,20 +733,47 @@ function buildExtractTicketsScript() {
           const m = val.match(/\\d{6,}/);
           if (m) return m[0];
         }
-        const m2 = norm(detail.textContent || '').match(/编号\\s*[:：]\\s*(\\d{6,})/);
+        const m2 = norm(scope.textContent || '').match(/编号\\s*[:：]\\s*(\\d{6,})/);
         return m2 ? m2[1] : '';
       }
 
-      const wrapper = getListWrapper();
-      let list = wrapper ? Array.from(wrapper.querySelectorAll(".handle-ticket-nav-item")) : [];
-      // 「我的待处理」等视图下列表容器可能不在原选择器内，兜底全局匹配避免左侧缓存一直为空
-      if (!list.length) {
-        list = Array.from(document.querySelectorAll(".handle-ticket-nav-item"));
+      function getActiveIdFromDetail() {
+        const detail =
+          document.querySelector('#ticket-detail') ||
+          document.querySelector('.ticket-detail-container') ||
+          document.querySelector('.detail-with-list-container');
+        if (!detail) return '';
+        return parseTicketNoFromRoot(detail);
       }
-      const activeId = getActiveIdFromDetail();
 
-      const result = [];
-      for (const item of list) {
+      function guessTicketNo(item) {
+        const attrKeys = ['data-ticket-id', 'data-id', 'data-ticketid', 'ticket-id', 'ticketid'];
+        for (const k of attrKeys) {
+          const v = norm(item.getAttribute?.(k) || '');
+          const m = v.match(/\\d{6,}/);
+          if (m) return m[0];
+        }
+        const ds = item.dataset || {};
+        for (const k of ['ticketId', 'ticketid', 'id']) {
+          const v = norm(ds[k] || '');
+          const m = v.match(/\\d{6,}/);
+          if (m) return m[0];
+        }
+        const href = norm(
+          item.getAttribute?.('href') ||
+            item.querySelector?.('a[href]')?.getAttribute?.('href') ||
+            ''
+        );
+        const hm = href.match(/(\\d{6,})/);
+        if (hm) return hm[1];
+        const fromItem = parseTicketNoFromRoot(item);
+        if (fromItem) return fromItem;
+        const raw = norm(item.textContent || '');
+        const mid = raw.match(/编号\\s*[:：]\\s*(\\d{6,})/);
+        return mid ? mid[1] : '';
+      }
+
+      function buildRow(item, activeId) {
         const title = guessTitle(item);
         const handler = guessInitiator(item);
         const statusText = guessStatus(item);
@@ -666,16 +783,10 @@ function buildExtractTicketsScript() {
           parsePriorityFromText(item.textContent || '') ||
           norm(item.querySelector('.priority')?.textContent || '');
         const createdAtText = guessTime(item);
-
-        let id = '';
-        const raw = norm(item.textContent || '');
-        const mid = raw.match(/编号\\s*[:：]\\s*(\\d{6,})/) || raw.match(/\\b(\\d{8,})\\b/);
-        if (mid) id = mid[1];
-
+        const id = guessTicketNo(item);
         const isActive = item.classList.contains('handle-ticket-nav-item-active') || item.classList.contains('active');
         const effectiveId = (id || (isActive ? activeId : '')) || '';
-
-        result.push({
+        return {
           id: effectiveId,
           title,
           handler,
@@ -683,16 +794,72 @@ function buildExtractTicketsScript() {
           createdAtText,
           statusText,
           isActive: !!isActive
-        });
+        };
       }
 
-      return { items: result, activeId };
+      function rowCollectKey(row, item) {
+        if (row.id) return 'id:' + row.id;
+        const time = (row.createdAtText || '').trim();
+        if (time) return 'sk:' + (row.title || '') + '|' + (row.handler || '') + '|' + time;
+        const elKey =
+          norm(item.getAttribute?.('id') || '') ||
+          norm(item.dataset?.ticketId || item.dataset?.id || '');
+        if (elKey) return 'el:' + elKey;
+        const sig = norm(item.textContent || '').replace(/\\s+/g, ' ').slice(0, 200);
+        return 'sig:' + sig;
+      }
+
+      const activeId = getActiveIdFromDetail();
+      const collected = new Map();
+
+      function scanVisible() {
+        const wrapper = getListWrapper();
+        let list = wrapper ? Array.from(wrapper.querySelectorAll('.handle-ticket-nav-item')) : [];
+        if (!list.length) {
+          list = Array.from(document.querySelectorAll('.handle-ticket-nav-item'));
+        }
+        for (const item of list) {
+          const row = buildRow(item, activeId);
+          if (!row.title && !row.id) continue;
+          const key = rowCollectKey(row, item);
+          const prev = collected.get(key);
+          if (!prev) {
+            collected.set(key, row);
+            continue;
+          }
+          if (!prev.id && row.id) collected.set(key, row);
+          else if (!prev.createdAtText && row.createdAtText) collected.set(key, { ...prev, createdAtText: row.createdAtText });
+        }
+      }
+
+      const wrapper = getListWrapper();
+      if (wrapper) {
+        const prevTop = wrapper.scrollTop;
+        wrapper.scrollTop = 0;
+        await sleep(100);
+        scanVisible();
+        for (let i = 0; i < 100; i += 1) {
+          const before = wrapper.scrollTop;
+          const delta = Math.max(240, Math.floor(wrapper.clientHeight * 0.85));
+          wrapper.scrollTop = before + delta;
+          await sleep(120);
+          scanVisible();
+          if (wrapper.scrollTop === before) break;
+        }
+        wrapper.scrollTop = prevTop;
+      } else {
+        scanVisible();
+      }
+
+      return { items: Array.from(collected.values()), activeId };
     })();
   `;
 }
 
-async function refreshTickets({ reset = false } = {}) {
-  if (!deps.getWebviewReady() || !deps.getTtWebview()) return;
+async function refreshTickets({ reset = false, apiOnly = false } = {}) {
+  const apiPrimary = await isApiPrimaryMode();
+  if (apiOnly && !apiPrimary) return;
+  if (!apiPrimary && !apiOnly && (!deps.getWebviewReady() || !deps.getTtWebview())) return;
   if (ticketRefreshInFlight) return;
 
   ticketRefreshInFlight = true;
@@ -705,12 +872,11 @@ async function refreshTickets({ reset = false } = {}) {
       const statusText = (x?.statusText || "").trim();
       const ownerMis = (x?.ownerMis || "").trim();
       const assigneeMis = (x?.assigneeMis || "").trim();
-      const id = (x?.id || "").trim() || null;
+      const id = normalizeTicketId(x?.id);
       const isActive = (!!id && !!activeId && String(id) === String(activeId)) || !!x?.isActive;
       const pr = parsePriorityRank(priorityText);
       const createdEpoch = parseCreatedAtEpoch(createdAtText);
       const sr = statusRank(statusText);
-      const fingerprint = `${title}|${handler}|${priorityText}`;
       const row = {
         id,
         title,
@@ -724,9 +890,10 @@ async function refreshTickets({ reset = false } = {}) {
         statusText,
         statusRank: sr,
         isActive,
-        fingerprint
+        fingerprint: ""
       };
       normalizeTicketCreatedFields(row);
+      row.fingerprint = buildTicketFingerprint(row);
       return row;
     }
 
@@ -772,7 +939,11 @@ async function refreshTickets({ reset = false } = {}) {
         }
         return t;
       }
-      const id = String(api?.id || api?.ticketId || api?.ticketID || "").trim();
+      const id =
+        normalizeTicketId(
+          pickAny(api, ["id", "ticketId", "ticketID", "ticketNo", "serialId", "number", "sn"]) ||
+            pickAny(api?.ticket || {}, ["id", "ticketId", "ticketID"])
+        ) || "";
       const title = String(api?.name || api?.title || api?.ticketName || "").trim();
       const handler = String(api?.creatorName || api?.creator || api?.reporterName || api?.reporter || "").trim();
       const statusText = String(api?.state || api?.status || api?.ticketState || "").trim();
@@ -811,14 +982,14 @@ async function refreshTickets({ reset = false } = {}) {
     let mapped = [];
     let activeId = "";
     let usedApi = false;
-    function buildBaseApiParams() {
+    function buildBaseApiParams({ includeAssigneeFilter = true } = {}) {
       const p = {
         cn: 1,
         sn: 100,
         orderField: "createdAt",
         orderKind: "DESC"
       };
-      if (ticketOnlyMine) {
+      if (ticketOnlyMine && includeAssigneeFilter) {
         // 在接口层直接收敛“只看我的工单”，避免拉回后前端再过滤仍出现同组他人单
         p.assignee = getHandler();
         p.assigneeMis = getHandler();
@@ -833,141 +1004,174 @@ async function refreshTickets({ reset = false } = {}) {
       return p;
     }
 
-    // 注意：后端可能把 rgIds 与 filterId 当作“交集”处理，导致 7599 组工单被过滤掉。
-    // 因此这里用“并集”：分别查 4个RG 与 filter=7599，再合并去重。
-    const baseApiParams = buildBaseApiParams();
-    const apiCalls = [];
-    apiCalls.push(
-      window.ttDesktopApi?.queryTicketsByApi?.({
-        username: getHandler(),
-        params: { ...baseApiParams, rgIds: TARGET_RG_IDS }
-      })
-    );
-    if (Array.isArray(TARGET_FILTER_IDS) && TARGET_FILTER_IDS.length) {
+    async function fetchApiListFromParams(baseApiParams) {
+      const apiCalls = [];
       apiCalls.push(
         window.ttDesktopApi?.queryTicketsByApi?.({
           username: getHandler(),
-          params: {
-            ...baseApiParams,
-            filterId: TARGET_FILTER_IDS[0],
-            filter: TARGET_FILTER_IDS[0],
-            filterIds: TARGET_FILTER_IDS
-          }
+          params: { ...baseApiParams, rgIds: TARGET_RG_IDS }
         })
       );
-    }
-
-    const results = await Promise.all(apiCalls);
-    const apiRes = results.find((x) => x?.ok && x?.data?.code === 200) || results[0];
-
-    if (results.some((r) => r?.ok && r?.data?.code === 200)) {
+      if (Array.isArray(TARGET_FILTER_IDS) && TARGET_FILTER_IDS.length) {
+        apiCalls.push(
+          window.ttDesktopApi?.queryTicketsByApi?.({
+            username: getHandler(),
+            params: {
+              ...baseApiParams,
+              filterId: TARGET_FILTER_IDS[0],
+              filter: TARGET_FILTER_IDS[0],
+              filterIds: TARGET_FILTER_IDS
+            }
+          })
+        );
+      }
+      const results = await Promise.all(apiCalls);
       const merged = new Map();
       for (const r of results) {
         if (!r?.ok || r?.data?.code !== 200) continue;
         const apiItems = Array.isArray(r?.data?.data?.items) ? r.data.data.items : [];
         for (const x of apiItems) {
           const it = mapApiItem(x);
-          const key = it.id || `${it.title}|${it.handler}|${it.createdAtText}`;
-          if (!merged.has(key)) merged.set(key, it);
+          const nid = normalizeTicketId(it.id);
+          if (!nid || merged.has(nid)) continue;
+          merged.set(nid, it);
         }
       }
-      const apiList = Array.from(merged.values());
+      return { results, apiList: Array.from(merged.values()) };
+    }
+
+    // 注意：后端可能把 rgIds 与 filterId 当作“交集”处理，导致 7599 组工单被过滤掉。
+    // 因此这里用“并集”：分别查 4个RG 与 filter=7599，再合并去重。
+    const baseApiParams = buildBaseApiParams();
+    const { results, apiList } = await fetchApiListFromParams(baseApiParams);
+
+    if (results.some((r) => r?.ok && r?.data?.code === 200)) {
       if (apiList.length > 0 || reset) {
         mapped = apiList.map((x) => mapToTicketItem(x, ""));
         usedApi = true;
       }
     }
 
-    // API + TT 页面 DOM 永远做并集：避免 filterId/RG/权限差异导致漏单
-    // 同时修复“仅看我的”硬过滤：DOM 来源的工单来自「我的待处理」视图，可直接补齐 ownerMis=当前MIS。
     let domExtra = [];
-    try {
-      const payload = await ttExecuteJavaScript(buildExtractTicketsScript());
-      const items = Array.isArray(payload?.items) ? payload.items : [];
-      activeId = (payload?.activeId || "").trim();
-      domExtra = items.map((x) => {
-        const t = mapToTicketItem(x, activeId);
-        if (ticketOnlyMine) {
-          const me = String(getHandler() || "").trim();
+
+    if (apiPrimary && usedApi) {
+      applyMineOwnerFallback(mapped);
+
+      const pendingHint = deps.getPendingCount?.();
+      if (ticketOnlyMine && Number.isFinite(pendingHint) && pendingHint > mapped.length) {
+        const relaxedParams = buildBaseApiParams({ includeAssigneeFilter: false });
+        const { apiList: relaxedList } = await fetchApiListFromParams(relaxedParams);
+        if (relaxedList.length) {
+          let relaxedMapped = relaxedList.map((x) => mapToTicketItem(x, ""));
+          const me = normalizeMis(getHandler());
           if (me) {
-            if (!t.ownerMis) t.ownerMis = me;
-            if (!t.assigneeMis) t.assigneeMis = me;
+            relaxedMapped = relaxedMapped.filter((t) => {
+              const owner = normalizeMis(t?.ownerMis || t?.assigneeMis || "");
+              return !owner || owner === me;
+            });
+            applyMineOwnerFallback(relaxedMapped);
+          }
+          const prevLen = mapped.length;
+          mapped = unionApiDomTickets(mapped, relaxedMapped);
+          if (mapped.length > prevLen) {
+            log(`待处理 ${pendingHint} 条、首轮 API ${prevLen} 条，放宽 assignee 后 ${mapped.length} 条`, "muted");
           }
         }
-        return t;
-      });
-    } catch {
-      // ignore DOM failure
-    }
+      }
 
-    if (!usedApi && results) {
+      tickets = dedupeTicketsForDisplay(mapped);
+      activeId = await fetchActiveIdFromDom();
+    } else if (apiPrimary && !usedApi) {
       const failed = results.find((r) => r && r.ok === false && r.message);
-      if (failed?.message) {
-        log(`API 拉单失败，已使用页面抓取兜底：${failed.message}`, "muted");
+      if (failed?.message) log(`API 拉单失败：${failed.message}`, "warning");
+      if (apiOnly) return;
+      if (!deps.getWebviewReady() || !deps.getTtWebview()) return;
+      log("API 拉单失败，临时使用 DOM 兜底列表。", "warning");
+    }
+
+    if (!apiPrimary || (apiPrimary && !usedApi)) {
+      try {
+        const payload = await ttExecuteJavaScript(buildExtractTicketsScript());
+        const items = Array.isArray(payload?.items) ? payload.items : [];
+        activeId = normalizeTicketId(payload?.activeId) || "";
+        domExtra = items.map((x) => {
+          const t = mapToTicketItem(x, activeId);
+          if (ticketOnlyMine) {
+            const me = String(getHandler() || "").trim();
+            if (me) {
+              if (!t.ownerMis) t.ownerMis = me;
+              if (!t.assigneeMis) t.assigneeMis = me;
+            }
+          }
+          return t;
+        });
+      } catch {
+        // ignore DOM failure
       }
-    }
 
-    if (!usedApi) {
-      mapped = domExtra.map((t) => {
-        normalizeTicketCreatedFields(t);
-        return t;
-      });
-    } else if (domExtra.length) {
-      mapped = mergeApiDomTicketLists(mapped, domExtra);
-    } else {
-      mapped.forEach((t) => normalizeTicketCreatedFields(t));
-    }
-
-    mapped = dedupeMappedTicketsBeforeMerge(mapped);
-
-    mergeTickets(mapped, { reset });
-
-    // 额外强制去重：对于没有 id 的条目，按 fingerprint（标题+发起人+优先级）保留唯一
-    // 必须先处理「有 id」的条目并登记 loose，否则会出现「先写入无 id、后写入同 loose 的有 id」两条并存
-    const withIdRows = tickets.filter((t) => t && t.id);
-    const withoutIdRows = tickets.filter((t) => t && !t.id);
-    const orderedForUniq = [...withIdRows, ...withoutIdRows];
-
-    const uniq = new Map();
-    const uniqLoose = new Set();
-    for (const t of orderedForUniq) {
-      const loose = buildLooseTicketKey(t);
-      const key = t.id ? `id:${t.id}` : `sk:${makeStableKey(t)}`;
-      if (!t.id && loose && uniqLoose.has(loose)) {
-        continue;
+      if (!usedApi && results) {
+        const failed = results.find((r) => r && r.ok === false && r.message);
+        if (failed?.message) {
+          log(`API 拉单失败，已使用页面抓取兜底：${failed.message}`, "muted");
+        }
       }
-      if (!uniq.has(key)) {
-        uniq.set(key, t);
-        if (loose) uniqLoose.add(loose);
-        continue;
-      }
-      // 若重复，优先保留 isActive 或有更完整时间的那条
-      const cur = uniq.get(key);
-      if (t.isActive && !cur.isActive) uniq.set(key, t);
-      else if (cur.createdAtEpoch == null && t.createdAtEpoch != null) uniq.set(key, t);
-    }
-    tickets = Array.from(uniq.values());
-    tickets = dedupeNoIdWhenIdTwinExists(tickets);
 
-    // 只允许一个高亮：若能拿到 activeId，强制按 id 唯一；否则保留第一个 isActive
-    if (activeId) {
-      for (const t of tickets) t.isActive = !!t.id && String(t.id) === String(activeId);
-    } else {
-      let found = false;
-      for (const t of tickets) {
-        if (t.isActive && !found) found = true;
-        else if (t.isActive && found) t.isActive = false;
+      const apiMapped = usedApi ? mapped.slice() : [];
+      if (!usedApi) {
+        mapped = unionApiDomTickets([], domExtra);
+      } else {
+        mapped = unionApiDomTickets(apiMapped, domExtra);
       }
+
+      applyMineOwnerFallback(mapped);
+
+      const pendingHint = deps.getPendingCount?.();
+      const needMore =
+        (Number.isFinite(pendingHint) && pendingHint > mapped.length) ||
+        domExtra.length > mapped.length;
+      if (usedApi && ticketOnlyMine && needMore) {
+        const relaxedParams = buildBaseApiParams({ includeAssigneeFilter: false });
+        const { apiList: relaxedList } = await fetchApiListFromParams(relaxedParams);
+        if (relaxedList.length) {
+          let relaxedMapped = relaxedList.map((x) => mapToTicketItem(x, ""));
+          const me = normalizeMis(getHandler());
+          if (me) {
+            relaxedMapped = relaxedMapped.filter((t) => {
+              const owner = normalizeMis(t?.ownerMis || t?.assigneeMis || "");
+              return !owner || owner === me;
+            });
+            applyMineOwnerFallback(relaxedMapped);
+          }
+          const prevLen = mapped.length;
+          mapped = unionApiDomTickets(mapped, relaxedMapped);
+          mapped = unionApiDomTickets(mapped, domExtra);
+          if (mapped.length > prevLen) {
+            log(
+              `待处理 ${pendingHint} 条、DOM ${domExtra.length} 条、首轮 ${prevLen} 条，放宽 assignee 后 ${mapped.length} 条`,
+              "muted"
+            );
+          }
+        }
+      }
+
+      if (!reset) {
+        mapped = preserveTicketsMissingFromMapped(mapped);
+      }
+
+      tickets = dedupeTicketsForDisplay(mapped);
     }
 
-    // 重建索引，避免 tickets 被去重后 ticketIndex 残留导致“已加载”异常增长
-    ticketIndex = new Map();
-    for (const t of tickets) {
-      if (t.id) ticketIndex.set(`id:${t.id}`, t);
-      ticketIndex.set(`sk:${makeStableKey(t)}`, t);
-    }
+    applyActiveIdToTickets(activeId);
+    rebuildTicketIndex();
 
     ticketLastUpdatedAt = new Date();
+    if (tickets.length <= 8) {
+      const brief = tickets
+        .map((t) => normalizeTicketId(t.id) || (t.createdAtText || "").slice(0, 11) || "?")
+        .join(", ");
+      const sourceLabel = apiPrimary && usedApi ? "API" : `API ${usedApi ? mapped.length : 0} + DOM ${domExtra.length}`;
+      log(`工单已同步 ${tickets.length} 条（${sourceLabel}）：${brief}`, "muted");
+    }
     renderTicketList();
     runSlaScan({ emitAlerts: true });
 
@@ -992,7 +1196,8 @@ async function handleTicketClick(item, options = {}) {
 
   const skipRefresh = !!options.skipRefresh;
 
-  const safeId = item.id ? JSON.stringify(item.id) : "null";
+  const clickTicketId = normalizeTicketId(item.id);
+  const safeId = clickTicketId ? JSON.stringify(clickTicketId) : "null";
   const safeFp = JSON.stringify(item.fingerprint || "");
 
   const clickScript = `
@@ -1006,13 +1211,9 @@ async function handleTicketClick(item, options = {}) {
         );
       }
       function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
-      function getActiveIdFromDetail() {
-        const detail =
-          document.querySelector('#ticket-detail') ||
-          document.querySelector('.ticket-detail-container') ||
-          document.querySelector('.detail-with-list-container');
-        if (!detail) return '';
-        const items = Array.from(detail.querySelectorAll('.info-item'));
+      function parseTicketNoFromRoot(root) {
+        const scope = root || document;
+        const items = Array.from(scope.querySelectorAll('.info-item'));
         for (const it of items) {
           const label = norm(it.querySelector('.info-label')?.textContent || '');
           if (!label.includes('编号')) continue;
@@ -1020,8 +1221,23 @@ async function handleTicketClick(item, options = {}) {
           const m = val.match(/\\d{6,}/);
           if (m) return m[0];
         }
-        const m2 = norm(detail.textContent || '').match(/编号\\s*[:：]\\s*(\\d{6,})/);
+        const m2 = norm(scope.textContent || '').match(/编号\\s*[:：]\\s*(\\d{6,})/);
         return m2 ? m2[1] : '';
+      }
+      function getActiveIdFromDetail() {
+        const detail =
+          document.querySelector('#ticket-detail') ||
+          document.querySelector('.ticket-detail-container') ||
+          document.querySelector('.detail-with-list-container');
+        if (!detail) return '';
+        return parseTicketNoFromRoot(detail);
+      }
+      function guessTicketNo(item) {
+        const fromItem = parseTicketNoFromRoot(item);
+        if (fromItem) return fromItem;
+        const raw = norm(item.textContent || '');
+        const mid = raw.match(/编号\\s*[:：]\\s*(\\d{6,})/);
+        return mid ? mid[1] : '';
       }
 
       const targetId = ${safeId};
@@ -1067,10 +1283,7 @@ async function handleTicketClick(item, options = {}) {
         const items = Array.from(wrapper.querySelectorAll('.handle-ticket-nav-item'));
 
         for (const it of items) {
-          const raw = norm(it.textContent || '');
-          let id = '';
-          const mid = raw.match(/编号\\s*[:：]\\s*(\\d{6,})/) || raw.match(/\\b(\\d{8,})\\b/);
-          if (mid) id = mid[1];
+          const id = guessTicketNo(it);
           if (targetId && id && String(id) === String(targetId)) {
             it.scrollIntoView({ block: 'center' });
             it.click();
@@ -1116,12 +1329,15 @@ async function handleTicketClick(item, options = {}) {
   const res = await ttExecuteJavaScript(clickScript);
   if (!res?.ok) {
     log(`跳转工单失败：${res?.reason || "unknown"}`, "warning");
-    if (!skipRefresh) await refreshTickets({ reset: false });
+    if (!skipRefresh) {
+      if (await isApiPrimaryMode()) await syncActiveHighlightFromDom();
+      else await refreshTickets({ reset: false });
+    }
     return false;
   }
 
-  await sleep(250);
-  if (!skipRefresh) await refreshTickets({ reset: false });
+  const activeId = normalizeTicketId(res.activeId) || clickTicketId;
+  syncTicketActiveState(activeId);
   return true;
 }
 
@@ -1155,7 +1371,8 @@ async function loadMoreTickets() {
     const res = await ttExecuteJavaScript(buildScrollTicketListScript({ direction: "down" }));
     if (!res?.ok || res?.atEnd) return;
     await sleep(120);
-    await refreshTickets({ reset: false });
+    if (await isApiPrimaryMode()) await syncActiveHighlightFromDom();
+    else await refreshTickets({ reset: false });
   } catch {
     // ignore
   }
@@ -1235,6 +1452,9 @@ async function loadMoreTickets() {
     renderTicketList,
     refreshTickets,
     handleTicketClick,
+    syncActiveHighlightFromDom,
+    startApiTicketPollTimer,
+    stopApiTicketPollTimer,
     loadMoreTickets,
     updateTicketMeta,
     syncSortButtonText

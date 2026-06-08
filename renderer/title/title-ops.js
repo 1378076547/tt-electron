@@ -488,7 +488,7 @@ function canRunTitleNormalizeOp({ allowWhileRunning = false } = {}) {
 }
 
 /**
- * 来单改标题：仅「开始」后新出现的待处理单（含转单）；检测后 confirm 写入。
+ * 来单改标题：仅「开始」后新出现的待处理单（含转单）；检测通过后自动写入。
  * @param {{ triggeredBy?: string }} [opts]
  */
 async function runNewTicketTitleNormalize(opts = {}) {
@@ -567,14 +567,7 @@ async function runNewTicketTitleNormalize(opts = {}) {
       return;
     }
 
-    const ok = window.confirm(
-      `[${tag}] 共 ${toApply.length} 条新工单建议改标题，是否在 TT 中逐条写入？\n（将自动点开标题、填入、失焦保存）`
-    );
-    if (!ok) {
-      log(`[${tag}] 已取消写入标题。`, "warning");
-      await refreshTickets({ reset: false });
-      return;
-    }
+    log(`[${tag}] 共 ${toApply.length} 条新工单，开始自动写入标题…`, "info");
 
     for (let j = 0; j < toApply.length; j += 1) {
       const row = toApply[j];
