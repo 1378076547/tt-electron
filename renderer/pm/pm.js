@@ -36,6 +36,14 @@
 /** @typedef {{ name: string, mis: string }} PmMember */
 /** @typedef {{ enabled: boolean, region_key: string, members: PmMember[], note: string }} PmCsvRule */
 
+/** members_mis 单元格内多人：; 或 ； 或 :（Excel 里常误用冒号） */
+function splitPmMembersCell(membersCell) {
+  return String(membersCell || "")
+    .split(/[;；:]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 function parsePmCsvContent(text) {
   const raw = String(text || "").replace(/^\uFEFF/, "");
   const lines = raw
@@ -66,7 +74,7 @@ function parsePmCsvContent(text) {
       membersCell = parts.slice(idxMm).join(",").trim();
     }
     const memberMap = new Map();
-    for (const part of membersCell.split(";")) {
+    for (const part of splitPmMembersCell(membersCell)) {
       const m = parsePmMemberToken(part);
       if (!m.mis) continue;
       if (!memberMap.has(m.mis)) memberMap.set(m.mis, m);
@@ -507,26 +515,26 @@ async function selectPmCsvFile() {
     const res = await window.ttDesktopApi?.selectAndReadPmCsv?.();
     if (!res || res.canceled) return;
     if (!res.ok) {
-      log(`选择 PM 配置文件失败：${res.message || "unknown"}`, "error");
+      log("配置文件加载失败，请检查文件格式。", "error");
       return;
     }
     const parsed = parsePmCsvContent(res.content || "");
     if (parsed.error === "bad_header") {
-      log("PM 配置 CSV 表头不正确，需要包含 region_key 与 members_mis 列。", "error");
+      log("配置文件格式不正确，请使用标准模板。", "error");
       return;
     }
     localStorage.setItem(STORAGE_KEYS.pmCsvPath, res.path || "");
     updatePmCsvPathLabel();
-    log(`已选择 PM 配置：${res.path}（有效规则 ${parsed.rules.filter((r) => r.enabled).length} 条）`, "success");
+    log(`PM 配置已加载，共 ${parsed.rules.filter((r) => r.enabled).length} 条规则。`, "success");
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    log(`选择 PM 配置异常：${msg}`, "error");
+    log("配置文件加载异常，请稍后重试。", "error");
   }
 }
 
 async function runPmPullByRegion() {
   if (!deps.getWebviewReady() || !deps.getTtWebview()) {
-    log("请先等待 TT 页面加载完成。", "warning");
+    log("工单页面加载中，请稍候…", "warning");
     return;
   }
   const opState = { busy: deps.getBusy(), pmPullInProgress, priorityBatchInProgress: deps.isPriorityBatchInProgress(), titleNormalizeInProgress: deps.isNormalizeInProgress() };
@@ -549,13 +557,13 @@ async function runPmPullByRegion() {
 
   const csvPath = (localStorage.getItem(STORAGE_KEYS.pmCsvPath) || "").trim();
   if (!csvPath) {
-    log("请先在工单面板点击「选择PM配置」选择 CSV 文件。", "warning");
+    log("请先选择 PM 配置文件。", "warning");
     return;
   }
 
   const active = deps.getTickets().find((t) => t && t.isActive);
   if (!active) {
-    log("请先在左侧工单列表中点击要处理的工单（高亮项），再点「按地区拉PM」。", "warning");
+    log("请先在列表中选中一条工单。", "warning");
     return;
   }
 
@@ -564,7 +572,7 @@ async function runPmPullByRegion() {
   try {
     const opened = await deps.handleTicketClick(active, { skipRefresh: true });
     if (!opened) {
-      log("无法打开目标工单，已取消拉 PM。", "error");
+      log("无法打开工单，已取消拉人。", "error");
       return;
     }
     await sleep(600);
@@ -575,55 +583,49 @@ async function runPmPullByRegion() {
 
     const fileRes = await window.ttDesktopApi?.readTextFile?.(csvPath);
     if (!fileRes?.ok) {
-      log(`读取 PM 配置失败：${fileRes?.message || "unknown"}`, "error");
+      log("配置文件读取失败，请重新选择。", "error");
       return;
     }
     const parsed = parsePmCsvContent(fileRes.content || "");
     if (!parsed.rules.length) {
-      log("PM 配置 CSV 中没有有效数据行。", "error");
+      log("配置文件为空，请检查内容。", "error");
       return;
     }
 
     const rule = matchPmRuleForTicket(parsed.rules, arch, title);
     if (!rule) {
-      log(
-        `未匹配到地区：发起人路径与标题中均未发现 CSV 里的 region_key（当前路径片段可参考日志）。\n  路径：${(arch || "（空）").slice(0, 120)}\n  标题：${(title || "（空）").slice(0, 80)}`,
-        "warning"
-      );
+      log("未匹配到地区，请检查工单信息或配置文件。", "warning");
       return;
     }
     if (!rule.members.length) {
-      log(`地区「${rule.region_key}」未配置 members_mis。`, "warning");
+      log(`地区「${rule.region_key}」未配置人员。`, "warning");
       return;
     }
 
     const pmTargets = rule.members.filter((m) => m && m.mis && m.name);
     const pmSkipped = rule.members.filter((m) => !m || !m.mis || !m.name);
     if (pmSkipped.length) {
-      log(
-        `以下成员未按「姓名/MIS」填写完整，已跳过：${pmSkipped.map((m) => formatPmMemberLabel(m) || "（空）").join("、")}`,
-        "warning"
-      );
+      log(`部分人员信息不完整，已跳过。`, "warning");
     }
     if (!pmTargets.length) {
-      log(`地区「${rule.region_key}」没有可用的「姓名/MIS」成员，请检查 CSV。`, "warning");
+      log(`地区「${rule.region_key}」没有可用人员，请检查配置。`, "warning");
       return;
     }
 
     const memberLabels = pmTargets.map((m) => formatPmMemberLabel(m)).join("、");
-    log(`按地区拉 PM：匹配「${rule.region_key}」→ 将添加 ${pmTargets.length} 人（姓名+MIS 双重校验）：${memberLabels}`, "info");
+    log(`地区「${rule.region_key}」匹配成功，将添加 ${pmTargets.length} 人。`, "info");
 
     const res = await ttExecuteJavaScript(buildPullPmMembersScript(pmTargets));
     if (!res?.ok) {
       const extra = Array.isArray(res?.logs) && res.logs.length ? `\n  明细：${res.logs.join("；")}` : "";
-      log(`拉 PM 未完成：${res?.reason || "unknown"}${extra}`, "error");
+      log("拉人未完成，请稍后重试。", "error");
     } else {
       const extra = Array.isArray(res?.logs) && res.logs.length ? `\n  明细：${res.logs.join("；")}` : "";
-      log(`拉 PM 已完成（已点确定）。${extra}`, "success");
+      log("拉人完成。", "success");
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    log(`拉 PM 异常：${msg}`, "error");
+    log("拉人异常，请稍后重试。", "error");
   } finally {
     setPmPullBusy(false);
     await deps.refreshTickets({ reset: false });

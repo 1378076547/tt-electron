@@ -379,14 +379,156 @@
     return cur;
   }
 
+  /** 标题以英文为主：含拉丁字母且汉字很少或没有 */
+  function isEnglishDominantTitle(title) {
+    const t = String(title || "");
+    if (!/[A-Za-z]/.test(t)) return false;
+    const han = (t.match(/[\u4e00-\u9fff]/g) || []).length;
+    const latin = (t.match(/[A-Za-z]/g) || []).length;
+    return han === 0 || latin > han * 2;
+  }
+
+  function normalizeEnglishSpaces(s) {
+    return String(s || "")
+      .trim()
+      .replace(/\s+/g, " ");
+  }
+
+  function isPlaceholderEnglishCustom(val) {
+    const v = normalizeEnglishSpaces(val).toLowerCase();
+    if (!v) return true;
+    return /e\.g\.|example|store no\.|id\s*&\s*name|请填写|请输入/.test(v);
+  }
+
+  /** 站点编号统一为 3 位：02 → 002（已是 3 位不变） */
+  function normalizeEnglishStoreNumber(text) {
+    const s = normalizeEnglishSpaces(text);
+    return s.replace(/(\s|^)(\d{2})(\s+)(?=[A-Za-z])/g, (_, lead, num, sp) => `${lead}${num.padStart(3, "0")}${sp}`);
+  }
+
+  /** 去掉 Store/ID&Name 开头误填的 Station（英文「车站」义，非门店编号） */
+  function stripMisleadingEnglishStationWord(text) {
+    const s = normalizeEnglishSpaces(text);
+    if (!s) return "";
+    return s.replace(/^station\s+/i, "").trim();
+  }
+
   /**
-   * @param {object} inspect { architectureRaw, warehouseStore, currentTitle }
+   * 自定义字段 City + Store（或 ID&Name）→「Riyadh 002 Ghirnatah」
+   * 用户填写优先于架构末级；误填的 Station 前缀会被剔除。
+   */
+  function buildEnglishPrefixFromCustomFields(city, store, idName) {
+    const c = isPlaceholderEnglishCustom(city) ? "" : normalizeEnglishSpaces(city);
+    let s = isPlaceholderEnglishCustom(store) ? "" : stripMisleadingEnglishStationWord(store);
+    const id = isPlaceholderEnglishCustom(idName) ? "" : stripMisleadingEnglishStationWord(idName);
+
+    if (c && s) {
+      if (s.toLowerCase().startsWith(c.toLowerCase())) return normalizeEnglishStoreNumber(s);
+      if (/^\d{2,4}\s+[A-Za-z]/.test(s)) return normalizeEnglishStoreNumber(`${c} ${s}`);
+      return normalizeEnglishStoreNumber(`${c} ${s}`);
+    }
+    if (c && id) {
+      if (id.toLowerCase().startsWith(c.toLowerCase())) return normalizeEnglishStoreNumber(id);
+      if (/^\d{2,4}\s+[A-Za-z]/.test(id)) return normalizeEnglishStoreNumber(`${c} ${id}`);
+      return normalizeEnglishStoreNumber(`${c} ${id}`);
+    }
+    if (s && /[A-Za-z]/.test(s) && /\d{2,4}/.test(s)) return normalizeEnglishStoreNumber(s);
+    if (id && /[A-Za-z]/.test(id) && /\d{2,4}/.test(id)) return normalizeEnglishStoreNumber(id);
+    if (c) return c;
+    return "";
+  }
+
+  /** 架构末级，如 …/Riyadh 002 Ghirnatah */
+  function buildEnglishPrefixFromArch(archRaw) {
+    const raw = String(archRaw || "").trim();
+    if (!raw.includes("/")) return "";
+    const parts = raw.split("/").map((x) => String(x || "").trim()).filter(Boolean);
+    if (!parts.length) return "";
+    const last = parts[parts.length - 1];
+    if (!/[A-Za-z]/.test(last)) return "";
+    if (!/\d{2,4}/.test(last)) return "";
+    return normalizeEnglishStoreNumber(normalizeEnglishSpaces(last));
+  }
+
+  function stripEnglishPrefixFromTitle(currentTitle, prefix) {
+    let t = normalizeEnglishSpaces(currentTitle);
+    const p = normalizeEnglishSpaces(prefix);
+    if (!p) return t;
+    if (t.toLowerCase().startsWith(p.toLowerCase())) return t.slice(p.length).trim();
+    const pNorm = normalizeEnglishStoreNumber(p);
+    if (pNorm.toLowerCase() !== p.toLowerCase() && t.toLowerCase().startsWith(pNorm.toLowerCase())) {
+      return t.slice(pNorm.length).trim();
+    }
+    return t;
+  }
+
+  /**
+   * 英文工单：仅在原标题前加「城市 编号 站点名」，不加事业部。
+   * 前缀来源：自定义字段 City/Store > 发起人架构末级。
+   */
+  function computeExpectedTitleEnglishSimple(inspect) {
+    const currentTitle = String(inspect?.currentTitle || "").trim();
+    const customPrefix = buildEnglishPrefixFromCustomFields(
+      inspect?.englishCity,
+      inspect?.englishStore,
+      inspect?.englishIdName
+    );
+    const archPrefix = buildEnglishPrefixFromArch(inspect?.architectureRaw);
+    const prefix = customPrefix || archPrefix;
+    const locationSource = customPrefix ? "custom" : archPrefix ? "arch" : "";
+
+    if (!prefix) {
+      return {
+        ok: false,
+        skip: true,
+        titleLang: "en",
+        reason: "英文标题：无法解析城市/站点（请填写 City、Store 自定义字段，或检查发起人架构末级）"
+      };
+    }
+
+    const body = stripEnglishPrefixFromTitle(currentTitle, prefix);
+    const expected = body ? `${prefix} ${body}` : prefix;
+
+    if (expected === currentTitle) {
+      return {
+        ok: true,
+        skip: true,
+        titleLang: "en",
+        reason: "标题已是目标格式",
+        expected,
+        currentTitle,
+        prefix,
+        body,
+        locationSource
+      };
+    }
+
+    return {
+      ok: true,
+      skip: false,
+      titleLang: "en",
+      reason: "",
+      expected,
+      currentTitle,
+      prefix,
+      body,
+      locationSource,
+      stationSource: locationSource
+    };
+  }
+
+  /**
+   * @param {object} inspect { architectureRaw, warehouseStore, currentTitle, englishCity?, englishStore?, englishIdName? }
    * @param {object} chinaJson china_cities.json 根对象
    */
   function computeExpectedTitle(inspect, chinaJson) {
     const archRaw = String(inspect?.architectureRaw || "").trim();
     const warehouse = String(inspect?.warehouseStore || "").trim();
     const currentTitle = String(inspect?.currentTitle || "").trim();
+
+    if (isEnglishDominantTitle(currentTitle)) {
+      return computeExpectedTitleEnglishSimple(inspect);
+    }
 
     if (!archRaw || !archRaw.includes("/")) {
       return { ok: false, skip: true, reason: "无发起人架构路径，跳过" };
@@ -488,6 +630,7 @@
   global.TTTitlePrefix = {
     buildCityMatchersFromJson,
     prepareMatchers,
-    computeExpectedTitle
+    computeExpectedTitle,
+    isEnglishDominantTitle
   };
 })(typeof window !== "undefined" ? window : globalThis);

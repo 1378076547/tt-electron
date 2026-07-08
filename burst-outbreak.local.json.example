@@ -1,0 +1,28 @@
+{
+  "enabled": true,
+  "notifyWindows": true,
+  "windowMinutes": 15,
+  "minDistinctSites": 4,
+  "categories": [
+    {
+      "id": "receipt_printer",
+      "label": "小票机",
+      "terms": ["小票机", "热敏", "标签机", "打印机", "打印"]
+    },
+    {
+      "id": "network_cut",
+      "label": "断网/没网",
+      "terms": ["断网", "没网", "整仓断网", "offline", "Offline"]
+    },
+    {
+      "id": "network",
+      "label": "网络",
+      "terms": ["网络", "网络卡顿", "Network", "network", "WIFI", "wifi", "WiFi"]
+    },
+    {
+      "id": "pda",
+      "label": "PDA",
+      "terms": ["PDA", "pda", "扫码枪", "手持", "扫码"]
+    }
+  ]
+}

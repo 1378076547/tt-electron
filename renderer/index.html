@@ -16,6 +16,8 @@
         <div class="controls">
           <span id="ticketCount" class="ticket-count">待处理：—</span>
           <span id="ticketSlaHeaderBadge" class="ticket-sla-header-badge" hidden aria-live="polite"></span>
+          <span id="hfIssueHeaderBadge" class="hf-issue-header-badge" hidden aria-live="polite"></span>
+          <span id="burstOutbreakHeaderBadge" class="burst-outbreak-header-badge" hidden aria-live="polite"></span>
           <span id="nextTick" class="countdown">距下次检查：—</span>
           <label class="field">
             <span class="label">处理人 MIS</span>
@@ -33,15 +35,15 @@
             <input id="autoSendMessageInput" type="checkbox" />
             <span>自动发送话术</span>
           </label>
-          <label class="checkbox" title="规范顺序：事业部→地区→站/仓名→问题；须含四品牌之一且前缀后出现站/仓/店等；不打开 TT；与「开始」不冲突">
+          <label class="checkbox" title="定时检查工单标题是否符合规范（事业部-地区-站/仓-问题）">
             <input id="titlePatrolLogInput" type="checkbox" />
             <span>标题巡检（仅日志）</span>
           </label>
-          <label class="checkbox" title="须先点「开始」；刷新列表后发现新工单时自动检测并改标题（逐条确认写入）">
+          <label class="checkbox" title="自动检测新工单标题并修改为规范格式">
             <input id="titleOnNewAutoInput" type="checkbox" />
-            <span>来单改标题（随开始）</span>
+            <span>来单改标题</span>
           </label>
-          <label class="start-switch" title="开启/停止自动接单处理">
+          <label class="start-switch" title="开启/停止自动接单">
             <input id="startBtn" type="checkbox" class="start-switch-input" aria-label="自动处理开关" />
             <span class="start-switch-track" aria-hidden="true">
               <span class="start-switch-thumb"></span>
@@ -63,7 +65,7 @@
 
           <div id="panelLogs" class="left-panel left-panel-active">
             <div id="logList" class="log-list">
-              <div class="log-item log-item-muted">Electron 版本 UI 已启动，正在等待自动接单配置。</div>
+              <div class="log-item log-item-muted">程序已启动，正在等待配置。</div>
             </div>
           </div>
 
@@ -103,13 +105,13 @@
                 </div>
                 <div class="ticket-action-buttons">
                   <button id="ticketRefreshBtn" class="ticket-toolbar-action ticket-toolbar-action--accent" type="button">刷新</button>
-                  <button id="ticketTitlePatrolBtn" class="ticket-toolbar-action" type="button" title="列表粗检：事业部→地区→站/仓名→问题；不打开 TT，结果写入执行日志">
+                  <button id="ticketTitlePatrolBtn" class="ticket-toolbar-action" type="button" title="检查当前工单标题是否规范">
                     标题巡检
                   </button>
                   <select
                     id="ticketPrioritySelect"
                     class="ticket-toolbar-select"
-                    title="修改当前选中工单优先级（会操作 TT 详情页）"
+                    title="修改当前选中工单的优先级"
                   >
                     <option value="非常紧急">非常紧急（S1）</option>
                     <option value="紧急">紧急（S2）</option>
@@ -121,7 +123,7 @@
                     id="ticketPriorityApplyBtn"
                     class="ticket-toolbar-action"
                     type="button"
-                    title="对当前选中工单写入优先级（会操作 TT 详情页）"
+                    title="修改选中工单的优先级"
                   >
                     设置优先级
                   </button>
@@ -130,14 +132,14 @@
                     id="ticketTitleOnNewBtn"
                     class="ticket-toolbar-action ticket-toolbar-action--accent"
                     type="button"
-                    title="须先点顶部「开始」；仅处理本次开始后新出现的待处理工单，检测后确认写入"
+                    title="自动检测新工单标题并修改为规范格式"
                   >
                     来单改标题
                   </button>
-                  <button id="pmCsvSelectBtn" class="ticket-toolbar-action" type="button" title="选择地区-MIS 对照表（CSV）">
+                  <button id="pmCsvSelectBtn" class="ticket-toolbar-action" type="button" title="选择地区与人员对照表">
                     选择PM配置
                   </button>
-                  <button id="pmPullByRegionBtn" class="ticket-toolbar-action ticket-toolbar-action--accent" type="button" title="先在左侧列表点击目标工单，再点此：按发起人路径/标题匹配地区，向大象群批量添加 PM">
+                  <button id="pmPullByRegionBtn" class="ticket-toolbar-action ticket-toolbar-action--accent" type="button" title="先选中工单，再根据工单地区自动添加对应 PM 到大象群">
                     按地区拉PM
                   </button>
                 </div>
@@ -159,7 +161,7 @@
                   id="ticketAutoPriorityBoostBtn"
                   class="ticket-batch-btn"
                   type="button"
-                  title="扫描当前可见工单标题，命中关键词（网络卡顿/断电/没网）则自动勾选，并批量设置为「高(S3)」"
+                  title="自动将标题含关键词的工单升至「高」优先级"
                 >
                   关键词升高优先级
                 </button>
@@ -167,23 +169,25 @@
                   id="ticketPriorityBatchBtn"
                   class="ticket-toolbar-action ticket-toolbar-action--accent"
                   type="button"
-                  title="按上方下拉值，顺序对勾选工单设置优先级（仅当前筛选列表内已勾选的项）"
+                  title="将选中的优先级批量应用到已勾选的工单"
                 >
                   批量设置优先级
                 </button>
                 <button id="ticketPriorityBatchStopBtn" class="ticket-batch-btn ticket-batch-btn--stop" type="button" disabled title="中断正在进行的批量设置">
                   停止批量
                 </button>
-                <label class="ticket-filter-check" title="创建满 40 小时预警（即将48h）、满 48 小时超时（已超48h）；未处理/处理中/暂停中工单">
+                <label class="ticket-filter-check" title="工单处理时长超过 40 小时预警，超过 48 小时提醒超时">
                   <input id="ticketSlaReminderToggle" type="checkbox" checked />
                   <span>48h时效提醒</span>
                 </label>
-                <label class="ticket-filter-check" title="需系统允许通知；与执行日志同时提醒">
+                <label class="ticket-filter-check" title="开启后通过桌面弹窗提醒">
                   <input id="ticketSlaNotifyToggle" type="checkbox" />
                   <span>Windows通知</span>
                 </label>
               </div>
               <div id="ticketSlaSummary" class="ticket-sla-summary" hidden aria-live="polite"></div>
+              <div id="hfIssueSummary" class="hf-issue-summary" hidden aria-live="polite"></div>
+              <div id="burstOutbreakSummary" class="burst-outbreak-summary" hidden aria-live="polite"></div>
               <div class="ticket-toolbar-footer">
                 <span class="ticket-updated">
                   最后更新：<span id="ticketLastUpdated">—</span>
@@ -233,7 +237,7 @@
         <section class="web-panel">
           <div class="web-header web-header-tt">
             <span>内置 TT 浏览器</span>
-            <span id="webviewLoadingHint" class="webview-loading-badge" aria-live="polite">TT 页面加载中…</span>
+            <span id="webviewLoadingHint" class="webview-loading-badge" aria-live="polite">工单页面加载中…</span>
           </div>
           <webview id="ttWebview" class="web-frame" allowpopups></webview>
         </section>
@@ -251,6 +255,8 @@
     <script src="./tickets/tickets.js"></script>
     <script src="./priority/priority.js"></script>
     <script src="./pm/pm.js"></script>
+    <script src="./hf-issue/hf-issue.js"></script>
+    <script src="./burst-outbreak/burst-outbreak.js"></script>
     <script src="./title/title-ops.js"></script>
     <script src="./titlePatrolList.js"></script>
     <script src="./titlePrefixEngine.js"></script>

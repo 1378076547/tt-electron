@@ -1045,6 +1045,68 @@ body {
   line-height: 1.35;
 }
 
+.hf-issue-header-badge {
+  font-size: 12px;
+  font-weight: 700;
+  color: #fb923c;
+  margin-left: 4px;
+  white-space: nowrap;
+  animation: hf-issue-pulse 2s ease-in-out infinite;
+}
+
+@keyframes hf-issue-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+.hf-issue-summary {
+  margin: 6px 10px 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(251, 146, 60, 0.5);
+  background: rgba(124, 45, 18, 0.28);
+  color: #fed7aa;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.burst-outbreak-header-badge {
+  font-size: 12px;
+  font-weight: 700;
+  color: #f87171;
+  margin-left: 4px;
+  white-space: nowrap;
+  animation: burst-outbreak-pulse 2s ease-in-out infinite;
+}
+
+@keyframes burst-outbreak-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+.burst-outbreak-summary {
+  margin: 6px 10px 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(248, 113, 113, 0.55);
+  background: rgba(127, 29, 29, 0.32);
+  color: #fecaca;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
 .badge-sla {
   font-size: 10px;
   font-weight: 700;

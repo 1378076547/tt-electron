@@ -74,7 +74,11 @@ const {
   ticketSlaSummaryEl,
   ticketSlaHeaderBadgeEl,
   ticketSlaReminderToggle,
-  ticketSlaNotifyToggle
+  ticketSlaNotifyToggle,
+  hfIssueHeaderBadgeEl,
+  hfIssueSummaryEl,
+  burstOutbreakHeaderBadgeEl,
+  burstOutbreakSummaryEl
 } = TD.dom;
 
 const log = TD.log.log;
@@ -113,13 +117,19 @@ const {
   isNormalizeInProgress,
   getBaselineCount,
   clearQueue: clearTitleOnNewQueue,
+  clearTitleOnNewBaseline,
   resetTitleNewTicketBaseline,
+  ensureTitleBaselineIfNeeded,
+  syncTitleOnNewButtonState,
   buildTitleNormalizeInspectScript,
+  ensureNewTicketTitlesBeforeAccept,
   requestTitleOnNewAfterRefresh,
   flushTitleOnNewQueueIfPossible,
   runTicketTitlePatrolScan,
   runNewTicketTitleNormalize,
-  runTicketTitleNormalizeBatch
+  runTicketTitleNormalizeBatch,
+  startHandleListWatch,
+  stopHandleListWatch
 } = TD.titleOps;
 const {
   getTickets,
@@ -135,6 +145,7 @@ const {
   applyTicketFilters,
   sortTickets,
   getMyTodoTicketsForTitleOps,
+  getMyPendingTicketsForTitleOnNew,
   getTicketSelectKey,
   renderTicketList,
   refreshTickets,
@@ -142,9 +153,17 @@ const {
   syncActiveHighlightFromDom,
   startApiTicketPollTimer,
   stopApiTicketPollTimer,
+  restartApiTicketPollTimer,
+  commitPendingDomSyncAfterPageLoad,
+  commitApiTicketIdBaseline,
+  clearPendingDomSyncForTickets,
   loadMoreTickets,
   updateTicketMeta,
-  syncSortButtonText
+  syncSortButtonText,
+  scanHandleListForTitleWatch,
+  mapDomWatchItemToTicket,
+  isTtDomSyncPending,
+  isTicketItemInHandleList
 } = TD.tickets;
 const {
   getAutoPriorityBoostEnabled,
@@ -166,14 +185,21 @@ const {
   applyPriorityBatch
 } = TD.priority;
 const { isPullInProgress, updatePmCsvPathLabel, selectPmCsvFile, runPmPullByRegion } = TD.pm;
+const {
+  onStart: onHfIssueStart,
+  clearOnStop: clearHfIssueOnStop,
+  requestHfIssueAfterRefresh
+} = TD.hfIssue;
+const { requestBurstOutbreakAfterRefresh } = TD.burstOutbreak;
 
 
 /*
  * 工单标题前缀规范化：已实现「标题检测」按钮（runTicketTitleNormalizeBatch），规则如下：
  * - 无发起人架构 → 不改；词典 assets/china_cities.json。
  * - 外显顺序：事业部（品牌）→ 地区（城市）→ 站点名或仓名 → 原标题/问题简述。
+ * - 英文标题：仅在原标题前加「城市 编号 站点名」；优先自定义字段 City/Store，否则取发起人架构末级（如 Riyadh 002 Ghirnatah）；Store/ID&Name 开头误填的 Station 会剔除。
  * - 引擎格式：{事业部简称}{城市}{站点/仓/店名}+原标题正文；站/仓/店优先从架构路径解析，其次仓库/门店字段。
- * - 「来单改标题」须先「开始」；仅处理开始后新出现的待处理单（含转单），检测通过后自动写入。
+ * - 「来单改标题」可独立开启（仅改标题），或与「开始」同开（先改标题再接单）；相对基线识别新单。
  * - 「标题巡检」逻辑独立在 titlePatrolList.js（TTTitlePatrolList.patrolListTitles）；「标题检测」在 titlePrefixEngine.js（TTTitlePrefix）。
  */
 
@@ -317,6 +343,45 @@ function stopTimers() {
   batchRemaining = 0;
   sessionHandledCount = 0;
   updateNextTickDisplay();
+}
+
+function titleOnNewModeHint() {
+  if (!titleOnNewAutoEnabled) return "";
+  return running ? "新单将先改标题再接单" : "仅自动改标题，不接单";
+}
+
+function logTitleOnNewEnabled() {
+  log("来单改标题已开启。", "info");
+}
+
+function applyTitleOnNewAutoState(enabled) {
+  titleOnNewAutoEnabled = !!enabled;
+  if (titleOnNewAutoInput) titleOnNewAutoInput.checked = titleOnNewAutoEnabled;
+  localStorage.setItem(STORAGE_KEYS.titleOnNewAuto, titleOnNewAutoEnabled ? "1" : "0");
+  if (titleOnNewAutoEnabled) {
+    clearTitleOnNewQueue();
+    restartApiTicketPollTimer();
+    void refreshTickets({ reset: false })
+      .then(() => {
+        resetTitleNewTicketBaseline();
+        startHandleListWatch();
+        logTitleOnNewEnabled();
+        syncTitleOnNewButtonState();
+      })
+      .catch(() => {
+        resetTitleNewTicketBaseline();
+        startHandleListWatch();
+        logTitleOnNewEnabled();
+        syncTitleOnNewButtonState();
+      });
+  } else {
+    stopHandleListWatch();
+    clearTitleOnNewQueue();
+    clearTitleOnNewBaseline();
+    restartApiTicketPollTimer();
+    syncTitleOnNewButtonState();
+    log("来单改标题已关闭。", "muted");
+  }
 }
 
 function saveSettings() {
@@ -813,41 +878,45 @@ function buildCheckAndHandleScript(handler, autoCreateGroup, elephantMessage, el
 function statusToMessage(status) {
   switch (status) {
     case "no_list":
-      return "未找到工单列表，可能页面尚未加载完成。";
+      return "工单页面加载中，请稍候…";
     case "no_pending":
-      return "当前没有可开始处理的“未处理”工单。";
+      return "当前没有待处理工单。";
     case "no_detail":
-      return "未找到工单详情区域，已跳过本轮。";
+      return "工单详情加载中，本轮已跳过。";
     case "handler_not_match":
-      return "处理人不匹配，已跳过本轮。";
+      return "当前工单不归你处理，已跳过。";
     case "state_not_pending":
-      return "当前工单状态不是“未处理”，已跳过。";
+      return "工单已被处理，已跳过。";
     case "no_handle_btn":
-      return "未找到“开始处理/开启处理”按钮。";
+      return "工单操作按钮未就绪，请稍后重试。";
     case "clicked_handle":
-      return "已自动点击“开始处理”。";
+      return "已开始处理工单。";
     case "clicked_handle|group_confirmed":
-      return "已点击“开始处理”，并完成建群确认。";
+      return "已开始处理，大象群已创建。";
     case "clicked_handle|group_session_ready":
-      return "已创建/加入群聊，且已出现“大象会话”标签。";
+      return "已加入大象群，可以发送消息。";
     case "clicked_handle|group_session_ready_no_send":
-      return "已创建/加入群聊并出现“大象会话”，当前配置为不自动发送话术。";
+      return "已加入大象群，未开启自动发送话术。";
     case "clicked_handle|group_session_ready_and_sent":
-      return "已创建/加入群聊，已打开“大象会话”并发送话术。";
+      return "已加入大象群，话术已发送。";
     case "clicked_handle|group_session_ready_but_send_failed":
-      return "已创建/加入群聊并出现“大象会话”，但未成功发送话术。";
+      return "已加入大象群，但话术发送失败。";
     case "clicked_handle|group_confirmed_no_session":
-      return "已点“确定”，但暂未检测到“大象会话”标签。";
+      return "大象群创建中，请稍候…";
     case "clicked_handle|group_btn_not_found":
-      return "已点击“开始处理”，但未找到“创建大象群”按钮。";
+      return "大象群创建按钮未就绪，请稍后重试。";
     case "clicked_handle|group_already":
-      return "已点击“开始处理”，该工单已存在大象群，无需重复建群。";
+      return "该工单已有大象群，无需重建。";
     case "clicked_handle|group_joined":
-      return "已点击“开始处理”，并执行“加入大象群”。";
+      return "已开始处理，并加入大象群。";
     case "clicked_handle|group_no_confirm":
-      return "已点击“开始处理”，但建群确认按钮未找到。";
+      return "建群确认未完成，请稍后重试。";
+    case "title_pending":
+      return "等待改标题完成后再接单…";
+    case "unknown":
+      return "操作异常，请稍后重试。";
     default:
-      return `脚本返回：${status}`;
+      return `操作未完成（${String(status).slice(0, 40)}），请稍后重试。`;
   }
 }
 
@@ -908,7 +977,20 @@ async function refreshPendingCount() {
 }
 
 async function runCheck() {
-  if (!running || busy || isBatchInProgress() || isPullInProgress() || !webviewReady || !ttWebview) return null;
+  if (!running || busy || isBatchInProgress() || isPullInProgress() || isNormalizeInProgress() || !webviewReady || !ttWebview) {
+    return null;
+  }
+
+  if (titleOnNewAutoEnabled) {
+    const titlesReady = await ensureNewTicketTitlesBeforeAccept({
+      tryRefresh: !batchInProgress || batchHandledCount === 0
+    });
+    if (!titlesReady) {
+      return { status: "title_pending", pendingCount: NaN };
+    }
+    if (!running || busy || isNormalizeInProgress() || !webviewReady || !ttWebview) return null;
+  }
+
   busy = true;
 
   try {
@@ -936,7 +1018,7 @@ async function runCheck() {
     return { status, pendingCount };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    log(`执行失败：${message}`, "error");
+    log("操作失败，请稍后重试。", "error");
     return { status: "unknown", pendingCount: NaN };
   } finally {
     busy = false;
@@ -949,13 +1031,40 @@ function isHandledStatus(status) {
 
 function startBatchIfNeeded(reason = "定时触发") {
   if (!running || !ttWebview) return;
-  if (batchInProgress || pendingRunAfterReload || busy || isBatchInProgress() || isPullInProgress()) return;
+  if (batchInProgress || pendingRunAfterReload || busy || isBatchInProgress() || isPullInProgress() || isNormalizeInProgress()) {
+    return;
+  }
 
   batchInProgress = true;
   batchHandledCount = 0;
   batchRemaining = DEFAULT_BATCH_LIMIT;
-  log(`开始批量处理（${reason}），单轮上限 ${DEFAULT_BATCH_LIMIT} 单。`, "info");
+  log(`开始自动接单，本轮最多处理 ${DEFAULT_BATCH_LIMIT} 单。`, "info");
   refreshPageThenRunCheck();
+}
+
+function requestAcceptAfterTitle() {
+  if (!running || !ttWebview) return;
+  if (isNormalizeInProgress() || busy) {
+    pendingRunAfterReload = true;
+    return;
+  }
+  if (!batchInProgress) {
+    startBatchIfNeeded("改标题后接单");
+    return;
+  }
+  refreshPageThenRunCheck();
+}
+
+/** API 来新单且已开「开始」：触发一轮批次 F5，无需用户手动刷新 */
+function requestBatchPageRefresh(reason = "api_new_ticket") {
+  if (!running || !ttWebview) return false;
+  if (pendingRunAfterReload) return true;
+  if (isNormalizeInProgress()) return true;
+  if (batchInProgress || busy) {
+    return true;
+  }
+  startBatchIfNeeded(reason === "api_new_ticket" ? "API 来新单" : String(reason || "同步"));
+  return true;
 }
 
 function finishBatch() {
@@ -969,16 +1078,44 @@ function finishBatch() {
 function handleBatchResult(result) {
   if (!batchInProgress || !running) return;
 
+  if (!result) {
+    setTimeout(() => {
+      if (!running || !batchInProgress) return;
+      void runCheck().then((r) => handleBatchResult(r));
+    }, 2500);
+    return;
+  }
+
   const status = result?.status || "unknown";
+  if (status === "title_pending") {
+    setTimeout(() => {
+      if (!running || !batchInProgress) return;
+      refreshPageThenRunCheck();
+    }, 2000);
+    return;
+  }
+
   if (status === "no_pending") {
     const level = batchHandledCount > 0 ? "success" : "muted";
-    log(`本轮结束：未处理工单已清空，本轮处理 ${batchHandledCount} 单，本次启动累计处理 ${sessionHandledCount} 单。`, level);
+    log(`本轮接单完成：处理了 ${batchHandledCount} 单，累计 ${sessionHandledCount} 单。`, level);
     finishBatch();
     return;
   }
 
   if (!isHandledStatus(status)) {
-    log(`本轮结束：${statusToMessage(status)}（已处理 ${batchHandledCount} 单）`, statusToLevel(status));
+    const retryable =
+      status === "no_detail" ||
+      status === "no_handle_btn" ||
+      status === "unknown" ||
+      status === "no_list";
+    if (retryable) {
+      setTimeout(() => {
+        if (!running || !batchInProgress) return;
+        refreshPageThenRunCheck();
+      }, 2500);
+      return;
+    }
+    log(`本轮接单结束：${statusToMessage(status)}，已处理 ${batchHandledCount} 单。`, statusToLevel(status));
     finishBatch();
     return;
   }
@@ -986,9 +1123,9 @@ function handleBatchResult(result) {
   batchHandledCount += 1;
   sessionHandledCount += 1;
   batchRemaining -= 1;
-  log(`本轮进度：已处理 ${batchHandledCount} 单（本次启动累计 ${sessionHandledCount} 单）。`, "success");
+  log(`已处理 ${batchHandledCount} 单，累计 ${sessionHandledCount} 单。`, "success");
   if (batchRemaining <= 0) {
-    log(`达到单轮上限 ${DEFAULT_BATCH_LIMIT} 单，停止本轮批量处理。`, "warning");
+    log(`本轮已达上限 ${DEFAULT_BATCH_LIMIT} 单，暂停接单。`, "warning");
     finishBatch();
     return;
   }
@@ -1000,24 +1137,126 @@ function handleBatchResult(result) {
 }
 
 function refreshPageThenRunCheck() {
-  if (!running || !ttWebview || busy) return;
+  if (!running || !ttWebview || busy || isNormalizeInProgress()) return;
 
   pendingRunAfterReload = true;
+  requestTtWebviewReload("batch_next");
+}
+
+/** 两次自动刷新最短间隔，避免 reload 风暴 */
+const TT_AUTO_RELOAD_COOLDOWN_MS = 12000;
+let lastTtAutoReloadAt = 0;
+let ttSyncReloadQueued = false;
+let ttSyncReloadQueuedReason = "";
+
+function executeTtWebviewReload() {
+  if (!ttWebview) return false;
+  try {
+    if (typeof ttWebview.reload === "function") {
+      ttWebview.reload();
+      return true;
+    }
+  } catch {
+    // fall through
+  }
+  try {
+    const u =
+      (typeof ttWebview.getURL === "function" && ttWebview.getURL()) ||
+      ttWebview.getAttribute?.("src") ||
+      C.TT_WEBVIEW_DEFAULT_SRC;
+    if (typeof ttWebview.loadURL === "function") {
+      void Promise.resolve(ttWebview.loadURL(u)).catch(() => {});
+      return true;
+    }
+    ttWebview.setAttribute("src", u);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function ttReloadReasonLabel(reason) {
+  switch (reason) {
+    case "api_new_ticket":
+      return "API 来新单";
+    case "dom_lag":
+      return "页面列表滞后";
+    case "no_list_wrapper":
+      return "列表未加载";
+    case "title_on_new":
+      return "来单改标题";
+    case "batch_next":
+      return "接单下一轮";
+    default:
+      return "同步工单";
+  }
+}
+
+function isTtWebviewReloadInFlight() {
+  return !webviewReady;
+}
+
+/**
+ * 自动刷新 TT webview（等同 F5），API 来单后同步 DOM，无需用户手动操作。
+ * @param {string} [reason]
+ * @returns {boolean} 是否已发起 reload
+ */
+function requestTtWebviewReload(reason = "sync") {
+  if (!ttWebview) return false;
+
+  const isNewTicket = reason === "api_new_ticket" || reason === "dom_lag" || reason === "no_list_wrapper";
+  const now = Date.now();
+
+  if (isNormalizeInProgress() && reason !== "batch_next") {
+    ttSyncReloadQueued = true;
+    ttSyncReloadQueuedReason = reason;
+    return false;
+  }
+
+  if (
+    reason !== "batch_next" &&
+    !isNewTicket &&
+    now - lastTtAutoReloadAt < TT_AUTO_RELOAD_COOLDOWN_MS
+  ) {
+    ttSyncReloadQueued = true;
+    ttSyncReloadQueuedReason = reason;
+    return false;
+  }
+
+  if (!isNewTicket && busy) {
+    ttSyncReloadQueued = true;
+    ttSyncReloadQueuedReason = reason;
+    return false;
+  }
+
+  lastTtAutoReloadAt = now;
+  ttSyncReloadQueued = false;
+  ttSyncReloadQueuedReason = "";
   webviewReady = false;
   setWebviewLoadingHint(true);
-  log("已执行页面刷新（F5）。", "info");
 
-  try {
-    ttWebview.reload();
-  } catch {
-    pendingRunAfterReload = false;
-    webviewReady = true;
-    if (running) {
-      runCheck().then((result) => {
-        handleBatchResult(result);
-      });
-    }
+  if (reason !== "batch_next") {
+    log("正在刷新工单页面…", "info");
+  } else {
+    log("工单页面已刷新。", "info");
   }
+
+  if (!executeTtWebviewReload()) {
+    webviewReady = true;
+    setWebviewLoadingHint(false);
+    pendingRunAfterReload = false;
+    log("工单页面刷新失败，请稍后重试。", "error");
+    return false;
+  }
+  return true;
+}
+
+function tryFlushTtSyncReloadQueue() {
+  if (!ttSyncReloadQueued) return;
+  const reason = ttSyncReloadQueuedReason || "sync";
+  ttSyncReloadQueued = false;
+  ttSyncReloadQueuedReason = "";
+  requestTtWebviewReload(reason);
 }
 
 function restartRunningTimers() {
@@ -1040,7 +1279,7 @@ function restartRunningTimers() {
 function start() {
   if (running) return;
   if (!ttWebview) {
-    log("未找到 webview，无法启动自动处理。", "error");
+    log("程序初始化中，请稍后再试。", "error");
     return;
   }
 
@@ -1051,15 +1290,14 @@ function start() {
   updateNextTickDisplay();
 
   restartRunningTimers();
+  restartApiTicketPollTimer();
   if (!countdownTimer) countdownTimer = setInterval(updateNextTickDisplay, 1000);
 
   resetTitleNewTicketBaseline();
   clearTitleOnNewQueue();
-  if (ticketTitleOnNewBtn) ticketTitleOnNewBtn.disabled = false;
-  log(
-    `开始自动处理：间隔 ${getIntervalSec()} 秒，处理人 ${getHandler()}；来单改标题基线已建立（${getBaselineCount()} 条）。`,
-    "success"
-  );
+  syncTitleOnNewButtonState();
+  onHfIssueStart();
+  log(`自动接单已开启：每 ${getIntervalSec()} 秒检查一次，处理人 ${getHandler()}。`, "success");
   startBatchIfNeeded("启动后首轮");
 }
 
@@ -1068,10 +1306,16 @@ function stop() {
   setRunningState(false);
   clearAutoBoostQueue();
   clearTitleOnNewQueue();
-  if (ticketTitleOnNewBtn) ticketTitleOnNewBtn.disabled = true;
+  clearHfIssueOnStop();
+  restartApiTicketPollTimer();
+  syncTitleOnNewButtonState();
   stopTimers();
   restartTitlePatrolTimer();
-  log("已停止自动处理。", "info");
+  if (titleOnNewAutoEnabled) {
+    log("已停止接单。来单改标题仍开启，会继续自动改标题。", "info");
+  } else {
+    log("已停止自动接单。", "info");
+  }
 }
 
 function toggleStartStop() {
@@ -1096,11 +1340,10 @@ function bindEvents() {
       try {
         const result = await window.ttDesktopApi?.openLogsDir?.();
         if (typeof result === "string" && result.trim()) {
-          log(`打开日志文件夹失败：${result}`, "warning");
+          log("日志文件夹打开失败。", "warning");
         }
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        log(`打开日志文件夹失败：${message}`, "warning");
+        log("日志文件夹打开失败。", "warning");
       }
     });
   }
@@ -1128,7 +1371,7 @@ function bindEvents() {
     ticketPriorityApplyBtn.addEventListener("click", () => {
       applyPriorityForActiveTicket().catch((err) => {
         const msg = err instanceof Error ? err.message : String(err);
-        log(`设置优先级异常：${msg}`, "error");
+        log("优先级设置异常，请稍后重试。", "error");
       });
     });
   }
@@ -1155,7 +1398,7 @@ function bindEvents() {
     ticketAutoPriorityBoostToggle.addEventListener("change", () => {
       setAutoPriorityBoostEnabled(!!ticketAutoPriorityBoostToggle.checked);
       saveSettings();
-      log(`自动升高优先级：${getAutoPriorityBoostEnabled() ? "已开启" : "已关闭"}`, getAutoPriorityBoostEnabled() ? "info" : "muted");
+      log(`自动升高优先级${getAutoPriorityBoostEnabled() ? "已开启" : "已关闭"}`, getAutoPriorityBoostEnabled() ? "info" : "muted");
       if (getAutoPriorityBoostEnabled()) {
         requestAutoPriorityBoostFromRefresh();
       }
@@ -1164,15 +1407,15 @@ function bindEvents() {
   if (ticketAutoPriorityBoostBtn) {
     ticketAutoPriorityBoostBtn.addEventListener("click", () => {
       if (isBatchInProgress()) {
-        log("正在批量设置优先级，稍后再试。", "warning");
+        log("正在批量设置优先级，请稍候…", "warning");
         return;
       }
       if (isNormalizeInProgress()) {
-        log("请等待「标题检测」完成后再执行关键词升高优先级。", "warning");
+        log("请等待标题检测完成后再升高优先级。", "warning");
         return;
       }
       if (running) {
-        log("请先停止「开始」自动处理，再执行关键词升高优先级。", "warning");
+        log("请先停止自动接单，再升高优先级。", "warning");
         return;
       }
       const filtered = applyTicketFilters(getTickets());
@@ -1180,28 +1423,22 @@ function bindEvents() {
       const hits = selectVisibleByKeywordBoost(sorted);
       updateBatchPrioritySelectionCount();
       renderTicketList();
-      const uniqHits = Array.from(new Set(hits));
       const count = getBatchSelectionCount();
       if (!count) {
-        log(`未命中关键词（${AUTO_PRIORITY_BOOST_KEYWORDS.join(" / ")}）。`, "muted");
+        log("当前工单未命中关键词。", "muted");
         return;
       }
       if (ticketPrioritySelect) ticketPrioritySelect.value = AUTO_PRIORITY_BOOST_TARGET;
-      log(
-        `关键词命中 ${count} 条（${uniqHits.slice(0, 6).join(" / ")}），将批量设置为「${AUTO_PRIORITY_BOOST_TARGET}(S3)」。`,
-        "info"
-      );
-      applyPriorityBatch().catch((err) => {
-        const msg = err instanceof Error ? err.message : String(err);
-        log(`关键词升高优先级异常：${msg}`, "error");
+      log(`命中 ${count} 条工单，将升高至「高」优先级。`, "info");
+      applyPriorityBatch().catch(() => {
+        log("优先级设置异常，请稍后重试。", "error");
       });
     });
   }
   if (ticketPriorityBatchBtn) {
     ticketPriorityBatchBtn.addEventListener("click", () => {
-      applyPriorityBatch().catch((err) => {
-        const msg = err instanceof Error ? err.message : String(err);
-        log(`批量设置优先级异常：${msg}`, "error");
+      applyPriorityBatch().catch(() => {
+        log("优先级设置异常，请稍后重试。", "error");
         setPriorityBatchUiBusy(false);
       });
     });
@@ -1212,24 +1449,18 @@ function bindEvents() {
     });
   }
   if (ticketTitleOnNewBtn) {
-    ticketTitleOnNewBtn.disabled = !running;
+    syncTitleOnNewButtonState();
     ticketTitleOnNewBtn.addEventListener("click", () => {
       setActiveLeftTab("logs");
       runNewTicketTitleNormalize({ triggeredBy: "来单改标题" }).catch((err) => {
         const msg = err instanceof Error ? err.message : String(err);
-        log(`来单改标题异常：${msg}`, "error");
+        log("标题修改异常，请稍后重试。", "error");
       });
     });
   }
   if (titleOnNewAutoInput) {
     titleOnNewAutoInput.addEventListener("change", () => {
-      titleOnNewAutoEnabled = !!titleOnNewAutoInput.checked;
-      saveSettings();
-      if (!running && titleOnNewAutoEnabled) {
-        log("「来单改标题（随开始）」已勾选：请先点「开始」后才会在刷新时发现新单并改标题。", "info");
-      } else {
-        log(`来单改标题（随开始）：${titleOnNewAutoEnabled ? "已开启" : "已关闭"}`, titleOnNewAutoEnabled ? "info" : "muted");
-      }
+      applyTitleOnNewAutoState(!!titleOnNewAutoInput.checked);
     });
   }
   if (ticketTitleNormalizeBtn) {
@@ -1237,7 +1468,7 @@ function bindEvents() {
       setActiveLeftTab("logs");
       runTicketTitleNormalizeBatch().catch((err) => {
         const msg = err instanceof Error ? err.message : String(err);
-        log(`标题检测异常：${msg}`, "error");
+        log("标题检测异常，请稍后重试。", "error");
       });
     });
   }
@@ -1250,7 +1481,7 @@ function bindEvents() {
     pmPullByRegionBtn.addEventListener("click", () => {
       runPmPullByRegion().catch((err) => {
         const msg = err instanceof Error ? err.message : String(err);
-        log(`按地区拉PM异常：${msg}`, "error");
+        log("拉人异常，请稍后重试。", "error");
         // pm module handles busy in finally
       });
     });
@@ -1286,7 +1517,7 @@ function bindEvents() {
     ticketSlaReminderToggle.addEventListener("change", () => {
       saveSettings();
       const on = !!ticketSlaReminderToggle.checked;
-      log(`48h 时效提醒：${on ? "已开启" : "已关闭"}`, on ? "info" : "muted");
+      log(`工单时效提醒${on ? "已开启" : "已关闭"}`, on ? "info" : "muted");
       renderTicketList();
       runSlaScan({ emitAlerts: on });
     });
@@ -1294,7 +1525,7 @@ function bindEvents() {
   if (ticketSlaNotifyToggle) {
     ticketSlaNotifyToggle.addEventListener("change", () => {
       saveSettings();
-      log(`48h Windows 通知：${ticketSlaNotifyToggle.checked ? "已开启" : "已关闭"}`, "info");
+      log(`桌面通知${ticketSlaNotifyToggle.checked ? "已开启" : "已关闭"}`, "info");
     });
   }
   if (prioritySortBtn) {
@@ -1341,7 +1572,7 @@ function bindEvents() {
     titlePatrolLogInput.addEventListener("change", () => {
       saveSettings();
       if (titlePatrolLogInput.checked) {
-        log("标题巡检：已开启，将按「间隔」用左侧列表标题做粗检（不打开 TT），与「开始」可同时运行。", "info");
+        log("标题巡检已开启：定时检查工单标题是否规范。", "info");
       }
       restartTitlePatrolTimer();
     });
@@ -1365,7 +1596,7 @@ function bindEvents() {
   ttWebview.addEventListener("dom-ready", async () => {
     webviewReady = true;
     setWebviewLoadingHint(false);
-    log("TT 页面已加载完成。", "success");
+    log("工单页面已就绪。", "success");
     scheduleGuestIdleWork(async () => {
       await onTtPageLifecycle({ reset: true });
     });
@@ -1379,11 +1610,21 @@ function bindEvents() {
     webviewReady = true;
     scheduleGuestIdleWork(async () => {
       await onTtPageLifecycle({ reset: false });
+      commitPendingDomSyncAfterPageLoad();
       if (running && pendingRunAfterReload) {
         pendingRunAfterReload = false;
+        if (titleOnNewAutoEnabled) {
+          await sleep(600);
+        }
         const result = await runCheck();
         handleBatchResult(result);
+      } else if (running && titleOnNewAutoEnabled) {
+        flushTitleOnNewQueueIfPossible().catch(() => {});
+      } else {
+        flushTitleOnNewQueueIfPossible().catch(() => {});
       }
+      setWebviewLoadingHint(false);
+      tryFlushTtSyncReloadQueue();
     });
   });
 
@@ -1391,10 +1632,10 @@ function bindEvents() {
     pendingRunAfterReload = false;
     setWebviewLoadingHint(false);
     if (batchInProgress) {
-      log("页面刷新失败，本轮批量处理已中止。", "warning");
+      log("页面加载失败，本轮接单已中止。", "warning");
       finishBatch();
     }
-    log(`页面加载失败：${event.errorDescription || event.errorCode}`, "error");
+    log("工单页面加载失败，请检查网络连接。", "error");
   });
 
   // guest preload：仅 x.sankuai.com/bridge 中转（大象自定义协议由主进程 TT 专用 partition 的 webRequest 拦截，不碰 guest）
@@ -1454,8 +1695,7 @@ async function onTtPageLifecycle({ reset = false } = {}) {
   try {
     const st = await window.ttDesktopApi?.getTtApiConfigStatus?.();
     if (st?.ok) {
-      if (reset) await refreshTickets({ reset: true });
-      else await syncActiveHighlightFromDom();
+      await refreshTickets({ reset });
       return;
     }
   } catch {
@@ -1469,8 +1709,12 @@ async function setupApiTicketPolling() {
     const st = await window.ttDesktopApi?.getTtApiConfigStatus?.();
     if (!st?.ok) return;
     startApiTicketPollTimer();
-    log("工单列表：API 为主，每 30 秒自动拉单；DOM 仅用于高亮与点击跳转。", "info");
+    log("工单列表已就绪，新工单将自动处理。", "info");
     await refreshTickets({ reset: true, apiOnly: true });
+    if (titleOnNewAutoEnabled) {
+      ensureTitleBaselineIfNeeded();
+      startHandleListWatch();
+    }
   } catch {
     // ignore
   }
@@ -1480,9 +1724,9 @@ async function logTtApiConfigStatus() {
     const st = await window.ttDesktopApi?.getTtApiConfigStatus?.();
     if (!st) return;
     if (st.ok) {
-      log(`API 已配置（${st.env || "prod"}）：${st.configPath}`, "success");
+      log("工单接口已配置，可以开始使用。", "success");
     } else {
-      log(st.message || `API 未配置：${st.configPath || ""}`, "warning");
+      log("工单接口未配置，部分功能不可用。", "warning");
     }
   } catch {
     // ignore
@@ -1539,8 +1783,30 @@ function bindModuleDeps() {
     getAutoPriorityBoostEnabled,
     requestAutoPriorityBoostFromRefresh,
     requestTitleOnNewAfterRefresh,
+    requestHfIssueAfterRefresh,
+    requestBurstOutbreakAfterRefresh,
     scheduleTitlePatrolFromRefresh,
-    getTitlePatrolLogEnabled
+    getTitlePatrolLogEnabled,
+    getRunning: () => running,
+    getTitleOnNewAutoEnabled: () => titleOnNewAutoEnabled,
+    requestTtWebviewReload,
+    isTtWebviewReloadInFlight,
+    requestBatchPageRefresh
+  });
+  TD.burstOutbreak.bind({
+    isApiConfigured: async () => {
+      const st = await window.ttDesktopApi?.getTtApiConfigStatus?.();
+      return !!st?.ok;
+    }
+  });
+  TD.hfIssue.bind({
+    getHandler,
+    getTickets,
+    getRunning: () => running,
+    isApiConfigured: async () => {
+      const st = await window.ttDesktopApi?.getTtApiConfigStatus?.();
+      return !!st?.ok;
+    }
   });
   TD.sla.bind({
     makeStableKey,
@@ -1558,6 +1824,7 @@ function bindModuleDeps() {
     getHandler,
     makeStableKey,
     getMyTodoTicketsForTitleOps,
+    getMyPendingTicketsForTitleOnNew,
     sortTickets,
     handleTicketClick,
     refreshTickets,
@@ -1573,14 +1840,25 @@ function bindModuleDeps() {
     getPmPullInProgress: isPullInProgress,
     getTitleOnNewAutoEnabled: () => titleOnNewAutoEnabled,
     getTitlePatrolLogEnabled,
-    flushAutoPriorityBoostQueueIfPossible
+    flushAutoPriorityBoostQueueIfPossible,
+    isApiPrimaryMode: TD.tickets.isApiPrimaryMode,
+    waitForTicketInDom: TD.tickets.waitForTicketInDom,
+    isTicketVisibleInDom: TD.tickets.isTicketVisibleInDom,
+    requestTtWebviewReload,
+    scanHandleListForTitleWatch,
+    mapDomWatchItemToTicket,
+    isTtDomSyncPending,
+    isTicketItemInHandleList,
+    commitApiTicketIdBaseline,
+    clearPendingDomSyncForTickets,
+    requestAcceptAfterTitle
   });
 }
 
 function init() {
   bindModuleDeps();
   loadSettings();
-  if (ticketTitleOnNewBtn) ticketTitleOnNewBtn.disabled = !running;
+  syncTitleOnNewButtonState();
   if (ticketTitleNormalizeBtn) ticketTitleNormalizeBtn.disabled = running;
   updatePmCsvPathLabel();
   updateTicketCount(NaN);

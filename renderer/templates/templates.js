@@ -248,7 +248,7 @@
   function previewTemplateMatchForActiveTicket() {
     const title = deps.getActiveTicketTitle();
     if (!String(title || "").trim()) {
-      log("请先在工单列表中选中一条工单，再试匹配。", "warning");
+      log("请先在列表中选中一条工单。", "warning");
       return;
     }
     const rules = collectRulesFromUI();

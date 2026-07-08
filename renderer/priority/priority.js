@@ -125,7 +125,7 @@ function requestAutoPriorityBoostFromRefresh() {
   if (deps.getRunning()) {
     if (!autoPriorityBoostQueued) {
       autoPriorityBoostQueued = true;
-      log("自动升高已排队：将在本轮自动处理结束后执行。", "muted");
+      log("优先级升高排队中，将在接单后执行。", "muted");
     }
     return;
   }
@@ -180,11 +180,7 @@ async function runAutoPriorityBoostFromRefresh(options = {}) {
   deps.renderTicketList();
   if (D.ticketPrioritySelect) D.ticketPrioritySelect.value = AUTO_PRIORITY_BOOST_TARGET;
 
-  const uniqHits = Array.from(new Set(hits));
-  log(
-    `${reasonTag}：命中 ${batchPrioritySelected.size} 条（${uniqHits.slice(0, 6).join(" / ")}），将设置为「${AUTO_PRIORITY_BOOST_TARGET}(S3)」。`,
-    "info"
-  );
+  log(`${reasonTag}：命中 ${batchPrioritySelected.size} 条工单，将升高至「${AUTO_PRIORITY_BOOST_TARGET}」优先级。`, "info");
   await applyPriorityBatch({ confirm: false, reasonTag, allowRunning });
 }
 
@@ -513,40 +509,40 @@ function applyPriorityInWebview(target) {
 
 async function applyPriorityForActiveTicket() {
   if (!deps.getWebviewReady() || !deps.getTtWebview()) {
-    log("请先等待 TT 页面加载完成。", "warning");
+    log("工单页面加载中，请稍候…", "warning");
     return;
   }
   if (deps.isNormalizeInProgress()) {
-    log("请等待「标题检测」完成后再修改优先级。", "warning");
+    log("请等待标题检测完成后再修改优先级。", "warning");
     return;
   }
   if (priorityBatchInProgress) {
-    log("正在批量设置优先级，请等待完成后再单独设置。", "warning");
+    log("正在批量设置优先级，请稍候…", "warning");
     return;
   }
   if (deps.getPmPullInProgress()) {
-    log("正在执行「按地区拉PM」，请稍后再设置优先级。", "warning");
+    log("正在拉人，请稍后再设置优先级。", "warning");
     return;
   }
   if (deps.getRunning()) {
-    log("请先停止「开始」自动处理，再修改优先级。", "warning");
+    log("请先停止自动接单，再修改优先级。", "warning");
     return;
   }
 
   const target = String(D.ticketPrioritySelect?.value || "").trim();
   if (!target) {
-    log("未选择目标优先级。", "warning");
+    log("请先选择优先级。", "warning");
     return;
   }
 
   deps.setActiveLeftTab("logs");
-  log(`开始设置当前工单优先级：${target}…`, "info");
+  log(`正在设置优先级为「${target}」…`, "info");
 
   const res = await applyPriorityInWebview(target);
   if (!res?.ok) {
-    log(`设置优先级失败：${res?.reason || "unknown"}${formatPriorityApplyDebugSuffix(res)}`, "error");
+    log("优先级设置失败，请稍后重试。", "error");
   } else {
-    log(`优先级已更新：${String(res.actual || target)}`, "success");
+    log(`优先级已设为「${String(res.actual || target)}」。`, "success");
   }
 
   await sleep(260);
@@ -558,26 +554,26 @@ async function applyPriorityBatch(options = {}) {
   const reasonTag = String(options?.reasonTag || "").trim();
   const allowRunning = !!options?.allowRunning;
   if (!deps.getWebviewReady() || !deps.getTtWebview()) {
-    log("请先等待 TT 页面加载完成。", "warning");
+    log("工单页面加载中，请稍候…", "warning");
     return;
   }
   if (deps.isNormalizeInProgress()) {
-    log("请等待「标题检测」完成后再批量设置优先级。", "warning");
+    log("请等待标题检测完成后再批量设置。", "warning");
     return;
   }
   if (deps.getPmPullInProgress()) {
-    log("正在执行「按地区拉PM」，请稍后再批量设置优先级。", "warning");
+    log("正在拉人，请稍后再批量设置优先级。", "warning");
     return;
   }
   if (deps.getRunning() && !allowRunning) {
-    log("请先停止「开始」自动处理，再批量设置优先级。", "warning");
+    log("请先停止自动接单，再批量设置优先级。", "warning");
     return;
   }
   if (priorityBatchInProgress) return;
 
   const target = String(D.ticketPrioritySelect?.value || "").trim();
   if (!target) {
-    log("未选择目标优先级。", "warning");
+    log("请先选择优先级。", "warning");
     return;
   }
 
@@ -585,16 +581,16 @@ async function applyPriorityBatch(options = {}) {
   const sorted = deps.sortTickets(filtered);
   const toProcess = sorted.filter((item) => batchPrioritySelected.has(deps.getTicketSelectKey(item)));
   if (!toProcess.length) {
-    log("没有可处理的工单：请在列表中勾选工单，并确保它们出现在当前筛选结果中。", "warning");
+    log("请先在列表中勾选要处理的工单。", "warning");
     return;
   }
 
   if (confirm) {
     const okConfirm = window.confirm(
-      `将对 ${toProcess.length} 条工单顺序设置优先级为「${target}」（仅当前筛选列表内已勾选项）。\n\n确认继续？`
+      `将把 ${toProcess.length} 条工单的优先级设为「${target}」，确认继续？`
     );
     if (!okConfirm) {
-      log("已取消批量设置优先级。", "muted");
+      log("已取消批量设置。", "muted");
       return;
     }
   }
@@ -604,7 +600,7 @@ async function applyPriorityBatch(options = {}) {
   setPriorityBatchUiBusy(true);
   deps.setActiveLeftTab("logs");
   const tag = reasonTag ? `（${reasonTag}）` : "";
-  log(`开始批量设置优先级「${target}」${tag}，共 ${toProcess.length} 条（逐条打开 TT 详情并保存）…`, "info");
+  log(`开始批量设置 ${toProcess.length} 条工单优先级为「${target}」…`, "info");
 
   let okCount = 0;
   let failCount = 0;
@@ -612,7 +608,7 @@ async function applyPriorityBatch(options = {}) {
   try {
     for (let i = 0; i < toProcess.length; i += 1) {
       if (priorityBatchAbort) {
-        log(`批量设置已中止：已处理 ${i} 条，成功 ${okCount}，失败 ${failCount}。`, "warning");
+        log(`批量设置已中止：成功 ${okCount} 条，失败 ${failCount} 条。`, "warning");
         break;
       }
       const item = toProcess[i];
@@ -620,7 +616,7 @@ async function applyPriorityBatch(options = {}) {
       const opened = await deps.handleTicketClick(item, { skipRefresh: true });
       if (!opened) {
         failCount += 1;
-        log(`[批量优先级] ${i + 1}/${toProcess.length} 失败（未打开）：${label}`, "error");
+        log(`${i + 1}/${toProcess.length} 设置失败：${label}`, "error");
         continue;
       }
       await sleep(650);
@@ -631,18 +627,15 @@ async function applyPriorityBatch(options = {}) {
           const k = deps.getTicketSelectKey(item);
           if (k) autoPriorityBoostCooldown.set(k, Date.now());
         }
-        log(
-          `[批量优先级] ${i + 1}/${toProcess.length} 失败：${label} — ${res?.reason || "unknown"}${formatPriorityApplyDebugSuffix(res)}`,
-          "error"
-        );
+        log(`${i + 1}/${toProcess.length} 设置失败：${label}`, "error");
       } else {
         okCount += 1;
-        log(`[批量优先级] ${i + 1}/${toProcess.length} 已设为「${String(res.actual || target)}」：${label}`, "success");
+        log(`${i + 1}/${toProcess.length} 已设置：${label}`, "success");
       }
       await sleep(280);
     }
     if (!priorityBatchAbort) {
-      log(`批量设置优先级结束：成功 ${okCount}，失败 ${failCount}。`, failCount ? "warning" : "success");
+      log(`批量设置完成：成功 ${okCount} 条${failCount > 0 ? `，失败 ${failCount} 条` : ""}。`, failCount ? "warning" : "success");
     }
   } finally {
     priorityBatchInProgress = false;

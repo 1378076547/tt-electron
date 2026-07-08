@@ -8,6 +8,8 @@ contextBridge.exposeInMainWorld("ttDesktopApi", {
   queryTicketsByApi: (payload) => ipcRenderer.invoke("tt-api-query-tickets", payload),
   queryTicketDetailByApi: (payload) => ipcRenderer.invoke("tt-api-ticket-detail", payload),
   getTtApiConfigStatus: () => ipcRenderer.invoke("get-tt-api-config-status"),
+  getHfIssueConfig: () => ipcRenderer.invoke("get-hf-issue-config"),
+  getBurstOutbreakConfig: () => ipcRenderer.invoke("get-burst-outbreak-config"),
   openTtApiConfig: () => ipcRenderer.invoke("open-tt-api-config"),
   loadChinaCities: () => ipcRenderer.invoke("load-china-cities"),
   getAppVersion: () => ipcRenderer.invoke("get-app-version"),

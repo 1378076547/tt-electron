@@ -39,10 +39,21 @@
   let ticketOnlyMine = true;
   let ticketHideClosed = true;
 
-  /** API 已配置时的独立拉单间隔（不依赖 TT 页面 F5） */
-  const API_TICKET_POLL_MS = 30000;
+  /** API 轮询：自动接单/来单改标题时加快，以便尽早触发 TT 页面同步 */
+  const API_TICKET_POLL_IDLE_MS = 30000;
+  const API_TICKET_POLL_ACTIVE_MS = 10000;
+  /** 仅开「来单改标题」时：检测到来单后延迟刷新 TT（与 API 轮询配合，不必立刻 F5） */
+  const TT_DOM_SYNC_DEFER_MS = 3000;
   /** @type {ReturnType<typeof setInterval> | null} */
   let apiTicketPollTimer = null;
+  /** @type {Set<string>} */
+  let knownApiSyncedTicketIds = new Set();
+  let apiSyncedBaselineReady = false;
+  let ttReloadRequestedThisRefresh = false;
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let ttDomSyncTimer = null;
+  /** @type {TicketItem[]} */
+  let pendingDomSyncRows = [];
 
   let deps = {
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
@@ -51,14 +62,21 @@
     isApiConfigured: async () => false,
     getWebviewReady: () => false,
     getTtWebview: () => null,
+    getRunning: () => false,
+    getTitleOnNewAutoEnabled: () => false,
     isTicketBatchSelected: () => false,
     setTicketBatchSelected: () => {},
     updateBatchPrioritySelectionCount: () => {},
     getAutoPriorityBoostEnabled: () => false,
     requestAutoPriorityBoostFromRefresh: () => {},
     requestTitleOnNewAfterRefresh: () => {},
+    requestHfIssueAfterRefresh: () => {},
+    requestBurstOutbreakAfterRefresh: () => {},
     scheduleTitlePatrolFromRefresh: () => {},
-    getTitlePatrolLogEnabled: () => false
+    getTitlePatrolLogEnabled: () => false,
+    requestTtWebviewReload: () => false,
+    isTtWebviewReloadInFlight: () => false,
+    requestBatchPageRefresh: () => false
   };
 
   function bind(extra) {
@@ -78,6 +96,19 @@ async function isApiPrimaryMode() {
   } catch {
     return false;
   }
+}
+
+/** 工单列表 API 的 RG 范围：优先 tt-api.local.json 的 rgIds */
+async function getRgIds() {
+  try {
+    const st = await window.ttDesktopApi?.getTtApiConfigStatus?.();
+    if (Array.isArray(st?.rgIds) && st.rgIds.length) {
+      return st.rgIds.map((x) => Number(x)).filter((n) => Number.isFinite(n));
+    }
+  } catch {
+    // ignore
+  }
+  return Array.isArray(TARGET_RG_IDS) ? TARGET_RG_IDS.map((x) => Number(x)).filter((n) => Number.isFinite(n)) : [];
 }
 
 function buildFetchActiveIdScript() {
@@ -151,11 +182,22 @@ function stopApiTicketPollTimer() {
   }
 }
 
+function getApiTicketPollIntervalMs() {
+  if (deps.getRunning?.() || deps.getTitleOnNewAutoEnabled?.()) return API_TICKET_POLL_ACTIVE_MS;
+  return API_TICKET_POLL_IDLE_MS;
+}
+
 function startApiTicketPollTimer() {
   stopApiTicketPollTimer();
+  const ms = getApiTicketPollIntervalMs();
   apiTicketPollTimer = setInterval(() => {
     void refreshTickets({ apiOnly: true }).catch(() => {});
-  }, API_TICKET_POLL_MS);
+  }, ms);
+}
+
+function restartApiTicketPollTimer() {
+  if (!apiTicketPollTimer) return;
+  startApiTicketPollTimer();
 }
 
 /**
@@ -389,7 +431,7 @@ function applyTicketFilters(list) {
   return out;
 }
 
-/** 标题巡检/标题检测专用范围：仅当前处理人（MIS）且待处理状态 */
+/** 标题巡检/标题检测：仅当前处理人（MIS）且未处理/处理中/暂停中 */
 function getMyTodoTicketsForTitleOps(list) {
   const rows = Array.isArray(list) ? list.slice() : [];
   const me = normalizeMis(getHandler());
@@ -397,6 +439,29 @@ function getMyTodoTicketsForTitleOps(list) {
     const st = String(item?.statusText || "").trim();
     const isTodo = st.includes("未处理") || st.includes("处理中") || st.includes("暂停");
     if (!isTodo) return false;
+    if (!me) return true;
+    const owner = normalizeMis(item?.ownerMis || item?.assigneeMis || "");
+    if (!owner) return false;
+    return owner === me;
+  });
+}
+
+/** 来单改标题：仅当前处理人（MIS）且未处理状态 */
+function isPendingTicketStatus(statusText) {
+  const st = String(statusText || "").trim();
+  if (!st) return true;
+  const up = st.toUpperCase();
+  if (st.includes("未处理") || st.includes("待处理")) return true;
+  if (st.includes("暂停") || st.includes("处理中") || st.includes("已关闭") || st.includes("关闭")) return false;
+  if (up === "TODO" || up === "PENDING" || up === "OPEN" || up === "NEW") return true;
+  return false;
+}
+
+function getMyPendingTicketsForTitleOnNew(list) {
+  const rows = Array.isArray(list) ? list.slice() : [];
+  const me = normalizeMis(getHandler());
+  return rows.filter((item) => {
+    if (!isPendingTicketStatus(item?.statusText)) return false;
     if (!me) return true;
     const owner = normalizeMis(item?.ownerMis || item?.assigneeMis || "");
     if (!owner) return false;
@@ -863,6 +928,7 @@ async function refreshTickets({ reset = false, apiOnly = false } = {}) {
   if (ticketRefreshInFlight) return;
 
   ticketRefreshInFlight = true;
+  ttReloadRequestedThisRefresh = false;
   try {
     function mapToTicketItem(x, activeId = "") {
       const title = (x?.title || "").trim();
@@ -1005,25 +1071,34 @@ async function refreshTickets({ reset = false, apiOnly = false } = {}) {
     }
 
     async function fetchApiListFromParams(baseApiParams) {
+      const rgIds = await getRgIds();
       const apiCalls = [];
-      apiCalls.push(
-        window.ttDesktopApi?.queryTicketsByApi?.({
-          username: getHandler(),
-          params: { ...baseApiParams, rgIds: TARGET_RG_IDS }
-        })
-      );
-      if (Array.isArray(TARGET_FILTER_IDS) && TARGET_FILTER_IDS.length) {
+      if (rgIds.length) {
         apiCalls.push(
           window.ttDesktopApi?.queryTicketsByApi?.({
             username: getHandler(),
-            params: {
-              ...baseApiParams,
-              filterId: TARGET_FILTER_IDS[0],
-              filter: TARGET_FILTER_IDS[0],
-              filterIds: TARGET_FILTER_IDS
-            }
+            params: { ...baseApiParams, rgIds }
           })
         );
+      }
+      // 补充 filter 组：必须带 rgIds，禁止无 RG 的 filter 查询（会混入其他 RG 工单）
+      if (Array.isArray(TARGET_FILTER_IDS) && TARGET_FILTER_IDS.length && rgIds.length) {
+        for (const fid of TARGET_FILTER_IDS) {
+          const fidNum = Number(fid);
+          const scopeRgIds = Number.isFinite(fidNum) && rgIds.includes(fidNum) ? [fidNum] : rgIds;
+          apiCalls.push(
+            window.ttDesktopApi?.queryTicketsByApi?.({
+              username: getHandler(),
+              params: {
+                ...baseApiParams,
+                rgIds: scopeRgIds,
+                filterId: fid,
+                filter: fid,
+                filterIds: [fid]
+              }
+            })
+          );
+        }
       }
       const results = await Promise.all(apiCalls);
       const merged = new Map();
@@ -1040,8 +1115,7 @@ async function refreshTickets({ reset = false, apiOnly = false } = {}) {
       return { results, apiList: Array.from(merged.values()) };
     }
 
-    // 注意：后端可能把 rgIds 与 filterId 当作“交集”处理，导致 7599 组工单被过滤掉。
-    // 因此这里用“并集”：分别查 4个RG 与 filter=7599，再合并去重。
+    // 注意：后端可能把 rgIds 与 filterId 当作「交集」处理；filter 补充查询必须带 rgIds 限定范围。
     const baseApiParams = buildBaseApiParams();
     const { results, apiList } = await fetchApiListFromParams(baseApiParams);
 
@@ -1074,7 +1148,7 @@ async function refreshTickets({ reset = false, apiOnly = false } = {}) {
           const prevLen = mapped.length;
           mapped = unionApiDomTickets(mapped, relaxedMapped);
           if (mapped.length > prevLen) {
-            log(`待处理 ${pendingHint} 条、首轮 API ${prevLen} 条，放宽 assignee 后 ${mapped.length} 条`, "muted");
+            // relaxed assignee merge — no user-facing log
           }
         }
       }
@@ -1083,10 +1157,9 @@ async function refreshTickets({ reset = false, apiOnly = false } = {}) {
       activeId = await fetchActiveIdFromDom();
     } else if (apiPrimary && !usedApi) {
       const failed = results.find((r) => r && r.ok === false && r.message);
-      if (failed?.message) log(`API 拉单失败：${failed.message}`, "warning");
+      if (failed?.message) log("工单数据获取失败，正在重试…", "warning");
       if (apiOnly) return;
       if (!deps.getWebviewReady() || !deps.getTtWebview()) return;
-      log("API 拉单失败，临时使用 DOM 兜底列表。", "warning");
     }
 
     if (!apiPrimary || (apiPrimary && !usedApi)) {
@@ -1112,7 +1185,7 @@ async function refreshTickets({ reset = false, apiOnly = false } = {}) {
       if (!usedApi && results) {
         const failed = results.find((r) => r && r.ok === false && r.message);
         if (failed?.message) {
-          log(`API 拉单失败，已使用页面抓取兜底：${failed.message}`, "muted");
+          // fallback to page data — no user-facing log
         }
       }
 
@@ -1146,10 +1219,7 @@ async function refreshTickets({ reset = false, apiOnly = false } = {}) {
           mapped = unionApiDomTickets(mapped, relaxedMapped);
           mapped = unionApiDomTickets(mapped, domExtra);
           if (mapped.length > prevLen) {
-            log(
-              `待处理 ${pendingHint} 条、DOM ${domExtra.length} 条、首轮 ${prevLen} 条，放宽 assignee 后 ${mapped.length} 条`,
-              "muted"
-            );
+            // relaxed assignee merge — no user-facing log
           }
         }
       }
@@ -1166,12 +1236,12 @@ async function refreshTickets({ reset = false, apiOnly = false } = {}) {
 
     ticketLastUpdatedAt = new Date();
     if (tickets.length <= 8) {
-      const brief = tickets
-        .map((t) => normalizeTicketId(t.id) || (t.createdAtText || "").slice(0, 11) || "?")
-        .join(", ");
-      const sourceLabel = apiPrimary && usedApi ? "API" : `API ${usedApi ? mapped.length : 0} + DOM ${domExtra.length}`;
-      log(`工单已同步 ${tickets.length} 条（${sourceLabel}）：${brief}`, "muted");
+      log(`已加载 ${tickets.length} 条工单。`, "muted");
     }
+    if (apiPrimary && usedApi) {
+      await maybeAutoReloadTtWebviewAfterApiSync(tickets, { reset });
+    }
+
     renderTicketList();
     runSlaScan({ emitAlerts: true });
 
@@ -1179,10 +1249,14 @@ async function refreshTickets({ reset = false, apiOnly = false } = {}) {
     if (deps.getAutoPriorityBoostEnabled()) {
       deps.requestAutoPriorityBoostFromRefresh();
     }
-    deps.requestTitleOnNewAfterRefresh();
+    if (!ttReloadRequestedThisRefresh && !isTtDomSyncPending()) {
+      deps.requestTitleOnNewAfterRefresh();
+    }
+    deps.requestHfIssueAfterRefresh();
+    deps.requestBurstOutbreakAfterRefresh();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    log(`工单列表刷新失败：${message}`, "warning");
+    log(`工单列表刷新失败，请稍后重试。`, "warning");
   } finally {
     ticketRefreshInFlight = false;
     if (deps.getTitlePatrolLogEnabled()) {
@@ -1191,14 +1265,682 @@ async function refreshTickets({ reset = false, apiOnly = false } = {}) {
   }
 }
 
+function buildCollectDomTicketIdsScript() {
+  return `
+    (() => {
+      function norm(text) { return ((text || '').trim()).replace(/\\s+/g, ' '); }
+      function getListWrapper() {
+        return (
+          document.querySelector('.handle-list-wrapper') ||
+          document.querySelector('#handleListNav .handle-list-nav') ||
+          document.querySelector('.handle-list-nav')
+        );
+      }
+      function parseTicketNoFromRoot(root) {
+        const scope = root || document;
+        const items = Array.from(scope.querySelectorAll('.info-item'));
+        for (const it of items) {
+          const label = norm(it.querySelector('.info-label')?.textContent || '');
+          if (!label.includes('编号')) continue;
+          const val = norm(it.querySelector('.info-text')?.textContent || '');
+          const m = val.match(/\\d{6,}/);
+          if (m) return m[0];
+        }
+        const m2 = norm(scope.textContent || '').match(/编号\\s*[:：]\\s*(\\d{6,})/);
+        return m2 ? m2[1] : '';
+      }
+      function guessTicketNo(item) {
+        const fromItem = parseTicketNoFromRoot(item);
+        if (fromItem) return fromItem;
+        const raw = norm(item.textContent || '');
+        const mid = raw.match(/编号\\s*[:：]\\s*(\\d{6,})/);
+        return mid ? mid[1] : '';
+      }
+
+      const wrapper = getListWrapper();
+      if (!wrapper) return { hasListWrapper: false, ids: [] };
+
+      const ids = [];
+      const seen = new Set();
+      for (const it of wrapper.querySelectorAll('.handle-ticket-nav-item')) {
+        const id = guessTicketNo(it);
+        if (id && !seen.has(id)) {
+          seen.add(id);
+          ids.push(id);
+        }
+      }
+      return { hasListWrapper: true, ids };
+    })();
+  `;
+}
+
+async function collectDomTicketIdsQuick() {
+  if (!deps.getWebviewReady() || !deps.getTtWebview()) {
+    return { hasListWrapper: false, ids: [], idSet: new Set() };
+  }
+  try {
+    const res = await ttExecuteJavaScript(buildCollectDomTicketIdsScript());
+    const ids = Array.isArray(res?.ids) ? res.ids.map((x) => String(x)).filter(Boolean) : [];
+    return {
+      hasListWrapper: !!res?.hasListWrapper,
+      ids,
+      idSet: new Set(ids)
+    };
+  } catch {
+    return { hasListWrapper: false, ids: [], idSet: new Set() };
+  }
+}
+
+/** 轻量扫描 TT 右侧 handleListNav 可见行（双通道·DOM 来单发现） */
+function buildScanHandleListForTitleWatchScript() {
+  return `
+    (() => {
+      function norm(text) { return ((text || '').trim()).replace(/\\s+/g, ' '); }
+
+      function getListWrapper() {
+        return (
+          document.querySelector('.handle-list-wrapper') ||
+          document.querySelector('#handleListNav .handle-list-nav') ||
+          document.querySelector('.handle-list-nav')
+        );
+      }
+
+      function guessTitle(item) {
+        const direct =
+          item.querySelector('.ticket-name-text-display')?.textContent ||
+          item.querySelector('.content.title')?.textContent ||
+          item.querySelector('.title')?.textContent ||
+          '';
+        return norm(direct);
+      }
+
+      function guessStatus(item) {
+        const direct =
+          item.querySelector('.ticket-state-text')?.textContent ||
+          item.querySelector('.state')?.textContent ||
+          '';
+        const t = norm(direct);
+        if (t) return t;
+        const icon = item.querySelector('.ticket-state-icon');
+        if (icon?.classList.contains('ticket-state-todo')) return '未处理';
+        if (icon?.classList.contains('ticket-state-doing')) return '处理中';
+        if (icon?.classList.contains('ticket-state-pending')) return '暂停中';
+        return '';
+      }
+
+      function guessTime(item) {
+        const direct = item.querySelector('.right-wrapper')?.textContent || '';
+        return norm(direct);
+      }
+
+      function guessHandler(item) {
+        const direct =
+          item.querySelector('.user-name')?.textContent ||
+          item.querySelector('.list-user-icon .user-wrapper .user-name')?.textContent ||
+          item.querySelector('.nav-user')?.getAttribute('display-name') ||
+          item.querySelector('.import-info .img-text')?.textContent ||
+          item.querySelector('.import-info-header .img-text')?.textContent ||
+          '';
+        let t = norm(direct);
+        if (t) return t;
+        const whole = norm(item.textContent || '');
+        const m = whole.match(/发起人\\s*[:：]\\s*([^\\s|，,]+)/);
+        return m ? norm(m[1]) : '';
+      }
+
+      function parseTicketNoFromRoot(root) {
+        const scope = root || document;
+        const items = Array.from(scope.querySelectorAll('.info-item'));
+        for (const it of items) {
+          const label = norm(it.querySelector('.info-label')?.textContent || '');
+          if (!label.includes('编号')) continue;
+          const val = norm(it.querySelector('.info-text')?.textContent || '');
+          const m = val.match(/\\d{6,}/);
+          if (m) return m[0];
+        }
+        const m2 = norm(scope.textContent || '').match(/编号\\s*[:：]\\s*(\\d{6,})/);
+        return m2 ? m2[1] : '';
+      }
+
+      function guessTicketNo(item) {
+        const attrKeys = ['data-ticket-id', 'data-id', 'data-ticketid', 'ticket-id', 'ticketid'];
+        for (const k of attrKeys) {
+          const v = norm(item.getAttribute?.(k) || '');
+          const m = v.match(/\\d{6,}/);
+          if (m) return m[0];
+        }
+        const ds = item.dataset || {};
+        for (const k of ['ticketId', 'ticketid', 'id']) {
+          const v = norm(ds[k] || '');
+          const m = v.match(/\\d{6,}/);
+          if (m) return m[0];
+        }
+        const href = norm(
+          item.getAttribute?.('href') ||
+            item.querySelector?.('a[href]')?.getAttribute?.('href') ||
+            ''
+        );
+        const hm = href.match(/(\\d{6,})/);
+        if (hm) return hm[1];
+        const fromItem = parseTicketNoFromRoot(item);
+        if (fromItem) return fromItem;
+        const raw = norm(item.textContent || '');
+        const mid = raw.match(/编号\\s*[:：]\\s*(\\d{6,})/);
+        return mid ? mid[1] : '';
+      }
+
+      function getActiveIdFromDetail() {
+        const detail =
+          document.querySelector('#ticket-detail') ||
+          document.querySelector('.ticket-detail-container') ||
+          document.querySelector('.detail-with-list-container');
+        if (!detail) return '';
+        return parseTicketNoFromRoot(detail);
+      }
+
+      const wrapper = getListWrapper();
+      if (!wrapper) return { hasListWrapper: false, items: [] };
+
+      const activeId = getActiveIdFromDetail();
+      const items = [];
+      for (const el of wrapper.querySelectorAll('.handle-ticket-nav-item')) {
+        const title = guessTitle(el);
+        const handler = guessHandler(el);
+        const statusText = guessStatus(el);
+        const createdAtText = guessTime(el);
+        let id = guessTicketNo(el);
+        const isActive = el.classList.contains('handle-ticket-nav-item-active') || el.classList.contains('active');
+        if (!id && isActive && activeId) id = activeId;
+        if (!title && !id) continue;
+        items.push({ id, title, handler, statusText, createdAtText, isActive: !!isActive });
+      }
+      return { hasListWrapper: true, items };
+    })();
+  `;
+}
+
+function parseOwnerMisFromHandlerText(handlerText) {
+  const t = String(handlerText || "").trim();
+  if (!t) return "";
+  const parts = t.split("/");
+  if (parts.length >= 2) {
+    return normalizeMis(parts[parts.length - 1]);
+  }
+  return normalizeMis(t);
+}
+
+/** TT 左侧列表展示发起人；匹配行时用 handler 解析 MIS，不用 assigneeMis */
+function listPersonMisForTicketMatch(item) {
+  return normalizeMis(parseOwnerMisFromHandlerText(item?.handler) || "");
+}
+
+function mapDomWatchItemToTicket(row) {
+  const ownerMis = parseOwnerMisFromHandlerText(row?.handler);
+  const id = normalizeTicketId(row?.id) || "";
+  const ticket = {
+    id,
+    title: String(row?.title || "").trim(),
+    handler: String(row?.handler || "").trim(),
+    statusText: String(row?.statusText || "").trim(),
+    createdAtText: String(row?.createdAtText || "").trim(),
+    ownerMis,
+    assigneeMis: ownerMis,
+    isActive: !!row?.isActive
+  };
+  ticket.fingerprint = buildTicketFingerprint(ticket);
+  return ticket;
+}
+
+/** 工单是否已在 TT 左侧 handleListNav 列表中（按编号或标题+处理人匹配） */
+async function isTicketItemInHandleList(item) {
+  if (!deps.getWebviewReady() || !deps.getTtWebview() || !item) {
+    return { found: false, reason: "webview_not_ready" };
+  }
+  const snap = await scanHandleListForTitleWatch();
+  if (!snap.hasListWrapper) return { found: false, reason: "no_list_wrapper" };
+  const target = item.fingerprint ? item : mapDomWatchItemToTicket(item);
+  const rows = (snap.items || []).map(mapDomWatchItemToTicket);
+  for (const row of rows) {
+    if (ticketRowDomMatch(target, row)) {
+      return { found: true, reason: "in_list", row };
+    }
+  }
+  return { found: false, reason: "not_in_list", listCount: rows.length };
+}
+
+function ticketRowDomMatch(a, b) {
+  const idA = normalizeTicketId(a?.id);
+  const idB = normalizeTicketId(b?.id);
+  if (idA && idB && idA === idB) return true;
+  const titleA = normalizeTicketTitleForMatch(a?.title);
+  const titleB = normalizeTicketTitleForMatch(b?.title);
+  if (!titleA || !titleB) return false;
+  const titlesMatch =
+    titleA === titleB ||
+    titleA.includes(titleB) ||
+    titleB.includes(titleA);
+  if (!titlesMatch) return false;
+  const ownerA = listPersonMisForTicketMatch(a);
+  const ownerB = listPersonMisForTicketMatch(b);
+  if (ownerA && ownerB && ownerA !== ownerB) return false;
+  return true;
+}
+
+async function scanHandleListForTitleWatch() {
+  if (!deps.getWebviewReady() || !deps.getTtWebview()) {
+    return { hasListWrapper: false, items: [] };
+  }
+  try {
+    const res = await ttExecuteJavaScript(buildScanHandleListForTitleWatchScript());
+    const items = Array.isArray(res?.items) ? res.items : [];
+    return { hasListWrapper: !!res?.hasListWrapper, items };
+  } catch {
+    return { hasListWrapper: false, items: [] };
+  }
+}
+
+/** 页面刚刷新时列表可能尚未渲染，短时轮询避免误判「未同步」 */
+async function pollNewTicketsInHandleList(targetRows, maxWaitMs = 6000, intervalMs = 300) {
+  const targets = Array.isArray(targetRows) ? targetRows.filter(Boolean) : [];
+  if (!targets.length) return false;
+  const end = Date.now() + maxWaitMs;
+  while (Date.now() < end) {
+    if (await areNewTicketsVisibleInHandleList(targets)) return true;
+    if (await areNewTicketsReachableInDom(targets)) return true;
+    await sleep(intervalMs);
+  }
+  return false;
+}
+
+function titlesLooseMatchForDom(a, b) {
+  const titleA = normalizeTicketTitleForMatch(a?.title);
+  const titleB = normalizeTicketTitleForMatch(b?.title);
+  if (!titleA || !titleB) return false;
+  return titleA === titleB || titleA.includes(titleB) || titleB.includes(titleA);
+}
+
+/** API 通道：新单是否已出现在 TT handleListNav 列表（有则跳过页面刷新） */
+async function areNewTicketsVisibleInHandleList(targetRows) {
+  const targets = Array.isArray(targetRows) ? targetRows.filter(Boolean) : [];
+  if (!targets.length) return false;
+
+  const snap = await scanHandleListForTitleWatch();
+  if (!snap.hasListWrapper || !snap.items.length) return false;
+
+  const domTickets = snap.items.map(mapDomWatchItemToTicket);
+
+  for (const t of targets) {
+    const tid = normalizeTicketId(t.id);
+    let found = domTickets.some((d) => {
+      if (!isPendingTicketStatus(d.statusText)) return false;
+      const did = normalizeTicketId(d.id);
+      if (tid && did && tid === did) return true;
+      return ticketRowDomMatch(t, d);
+    });
+    if (!found && tid) {
+      found = domTickets.some((d) => {
+        if (!isPendingTicketStatus(d.statusText)) return false;
+        return normalizeTicketId(d.id) === tid;
+      });
+    }
+    if (!found) {
+      found = domTickets.some(
+        (d) => isPendingTicketStatus(d.statusText) && titlesLooseMatchForDom(t, d)
+      );
+    }
+    if (!found) return false;
+  }
+  return true;
+}
+
+/** 列表扫描未命中时，再按编号/标题逐项确认是否已在 DOM 可操作 */
+async function areNewTicketsReachableInDom(targetRows) {
+  const targets = Array.isArray(targetRows) ? targetRows.filter(Boolean) : [];
+  if (!targets.length) return false;
+  for (const t of targets) {
+    const inList = await isTicketItemInHandleList(t);
+    if (inList?.found) continue;
+    const id = normalizeTicketId(t.id);
+    if (id) {
+      const vis = await isTicketVisibleInDom(id);
+      if (vis?.found) continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+function pendingDomSyncKey(rows) {
+  return (Array.isArray(rows) ? rows : [])
+    .map((t) => normalizeTicketId(t?.id) || makeStableKey(t))
+    .filter(Boolean)
+    .sort()
+    .join(",");
+}
+
+function clearPendingDomSyncForTickets(rows) {
+  const ids = new Set(
+    (Array.isArray(rows) ? rows : []).map((t) => normalizeTicketId(t?.id)).filter(Boolean)
+  );
+  if (!ids.size || !pendingDomSyncRows.length) return;
+  pendingDomSyncRows = pendingDomSyncRows.filter((t) => {
+    const id = normalizeTicketId(t?.id);
+    return !id || !ids.has(id);
+  });
+  if (!pendingDomSyncRows.length && ttDomSyncTimer) {
+    clearTimeout(ttDomSyncTimer);
+    ttDomSyncTimer = null;
+  }
+}
+
+/** @returns {string[]} 相对上次 API 同步新出现的工单编号（未写入基线，刷新成功后再 commit） */
+function noteNewApiTicketIds(mapped, reset) {
+  const ids = mapped.map((t) => normalizeTicketId(t.id)).filter(Boolean);
+  if (reset || !apiSyncedBaselineReady) {
+    knownApiSyncedTicketIds = new Set(ids);
+    apiSyncedBaselineReady = true;
+    return [];
+  }
+  return ids.filter((id) => !knownApiSyncedTicketIds.has(id));
+}
+
+function commitApiTicketIdBaseline(mapped) {
+  const rows = Array.isArray(mapped) ? mapped : [];
+  for (const t of rows) {
+    const id = normalizeTicketId(t.id);
+    if (id) knownApiSyncedTicketIds.add(id);
+  }
+  apiSyncedBaselineReady = true;
+}
+
+/**
+ * 检测到来单后排队刷新 TT：开着「开始」走批次 F5；仅改标题则延迟数秒后自动刷新。
+ */
+function scheduleDeferredTtDomSync(reason, targets) {
+  const rows = Array.isArray(targets) ? targets.filter(Boolean) : [];
+  if (!rows.length) return;
+
+  const nextKey = pendingDomSyncKey(rows);
+  if (nextKey && nextKey === pendingDomSyncKey(pendingDomSyncRows)) {
+    return;
+  }
+
+  pendingDomSyncRows = rows;
+
+  if (deps.getRunning?.()) {
+    void (async () => {
+      const visible = await pollNewTicketsInHandleList(rows, 5000);
+      if (visible) {
+        commitApiTicketIdBaseline(rows);
+        clearPendingDomSyncForTickets(rows);
+        deps.requestTitleOnNewAfterRefresh?.();
+        return;
+      }
+      log(`发现 ${rows.length} 条新工单，等待自动接单…`, "info");
+      deps.requestBatchPageRefresh?.(reason);
+    })();
+    return;
+  }
+
+  if (ttDomSyncTimer) clearTimeout(ttDomSyncTimer);
+  log(
+    `发现 ${rows.length} 条新工单，约 ${Math.round(TT_DOM_SYNC_DEFER_MS / 1000)} 秒后自动刷新…`,
+    "info"
+  );
+  ttDomSyncTimer = setTimeout(() => {
+    ttDomSyncTimer = null;
+    void flushDeferredTtDomSync(reason);
+  }, TT_DOM_SYNC_DEFER_MS);
+}
+
+async function flushDeferredTtDomSync(reason) {
+  if (!pendingDomSyncRows.length || !deps.getTtWebview?.()) return;
+  if (deps.isTtWebviewReloadInFlight?.()) {
+    ttDomSyncTimer = setTimeout(() => {
+      void flushDeferredTtDomSync(reason);
+    }, 2000);
+    return;
+  }
+
+  const targets = pendingDomSyncRows.slice();
+  const reloaded = !!deps.requestTtWebviewReload?.(reason);
+  if (reloaded) {
+    pendingDomSyncRows = [];
+    ttReloadRequestedThisRefresh = true;
+    commitApiTicketIdBaseline(targets);
+  } else {
+    log("页面刷新排队中，请稍候…", "muted");
+  }
+}
+
+/** TT 页面 reload 完成后，提交待同步的新单基线 */
+function commitPendingDomSyncAfterPageLoad() {
+  if (!pendingDomSyncRows.length) return;
+  commitApiTicketIdBaseline(pendingDomSyncRows);
+  pendingDomSyncRows = [];
+}
+
+function isTtDomSyncPending() {
+  return pendingDomSyncRows.length > 0 || !!ttDomSyncTimer;
+}
+
+/**
+ * API 检测到来单：不立刻 F5，排队等程序自动刷新后再改标题/接单。
+ */
+async function maybeAutoReloadTtWebviewAfterApiSync(mapped, { reset = false } = {}) {
+  if (!deps.getTtWebview?.()) return;
+  if (deps.isTtWebviewReloadInFlight?.()) return;
+
+  const rows = Array.isArray(mapped) ? mapped : [];
+  const newIds = noteNewApiTicketIds(rows, reset);
+  const newRows = rows.filter((t) => {
+    const id = normalizeTicketId(t.id);
+    return id && newIds.includes(id);
+  });
+  const newMinePending = getMyPendingTicketsForTitleOnNew(newRows);
+
+  if (newMinePending.length > 0) {
+    if (deps.isTtWebviewReloadInFlight?.() || !deps.getWebviewReady?.()) {
+      pendingDomSyncRows = newMinePending;
+      return;
+    }
+    let alreadyInList = await pollNewTicketsInHandleList(newMinePending, 6000);
+    if (alreadyInList) {
+      commitApiTicketIdBaseline(newMinePending);
+      clearPendingDomSyncForTickets(newMinePending);
+      deps.requestTitleOnNewAfterRefresh();
+      return;
+    }
+    scheduleDeferredTtDomSync("api_new_ticket", newMinePending);
+    return;
+  }
+
+  if (newRows.length > 0) {
+    commitApiTicketIdBaseline(newRows);
+    return;
+  }
+
+  if (!reset) {
+    const domSnap = await collectDomTicketIdsQuick();
+    if (!domSnap.hasListWrapper) {
+      scheduleDeferredTtDomSync("no_list_wrapper", getMyPendingTicketsForTitleOnNew(rows));
+      return;
+    }
+    const pendingHint = deps.getPendingCount?.();
+    const minePending = getMyPendingTicketsForTitleOnNew(rows);
+    if (
+      Number.isFinite(pendingHint) &&
+      pendingHint > 0 &&
+      domSnap.ids.length === 0 &&
+      minePending.length > 0
+    ) {
+      scheduleDeferredTtDomSync("dom_lag", minePending);
+      return;
+    }
+  }
+
+  commitApiTicketIdBaseline(rows);
+}
+
+function buildTicketExistsInDomScript(ticketId) {
+  const safeId = ticketId ? JSON.stringify(String(ticketId)) : "null";
+  return `
+    (() => {
+      function norm(text) { return ((text || '').trim()).replace(/\\s+/g, ' '); }
+      function getListWrapper() {
+        return (
+          document.querySelector('.handle-list-wrapper') ||
+          document.querySelector('#handleListNav .handle-list-nav') ||
+          document.querySelector('.handle-list-nav')
+        );
+      }
+      function parseTicketNoFromRoot(root) {
+        const scope = root || document;
+        const items = Array.from(scope.querySelectorAll('.info-item'));
+        for (const it of items) {
+          const label = norm(it.querySelector('.info-label')?.textContent || '');
+          if (!label.includes('编号')) continue;
+          const val = norm(it.querySelector('.info-text')?.textContent || '');
+          const m = val.match(/\\d{6,}/);
+          if (m) return m[0];
+        }
+        const m2 = norm(scope.textContent || '').match(/编号\\s*[:：]\\s*(\\d{6,})/);
+        return m2 ? m2[1] : '';
+      }
+      function guessTicketNo(item) {
+        const fromItem = parseTicketNoFromRoot(item);
+        if (fromItem) return fromItem;
+        const raw = norm(item.textContent || '');
+        const mid = raw.match(/编号\\s*[:：]\\s*(\\d{6,})/);
+        return mid ? mid[1] : '';
+      }
+
+      const targetId = ${safeId};
+      const wrapper = getListWrapper();
+      if (!wrapper) return { found: false, reason: 'no_list_wrapper' };
+
+      const detail =
+        document.querySelector('#ticket-detail') ||
+        document.querySelector('.ticket-detail-container') ||
+        document.querySelector('.detail-with-list-container');
+      const activeId = detail ? parseTicketNoFromRoot(detail) : '';
+      if (targetId && activeId && String(activeId) === String(targetId)) {
+        return { found: true, reason: 'in_detail', activeId };
+      }
+
+      const items = Array.from(wrapper.querySelectorAll('.handle-ticket-nav-item'));
+      for (const it of items) {
+        const id = guessTicketNo(it);
+        if (targetId && id && String(id) === String(targetId)) {
+          return { found: true, reason: 'in_list', activeId };
+        }
+      }
+      return { found: false, reason: 'not_in_list', listCount: items.length };
+    })();
+  `;
+}
+
+function buildNudgeTtDomListSyncScript(defaultHandleUrl) {
+  const safeUrl = JSON.stringify(defaultHandleUrl || C.TT_WEBVIEW_DEFAULT_SRC);
+  return `
+    (async () => {
+      function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+      function getListWrapper() {
+        return (
+          document.querySelector('.handle-list-wrapper') ||
+          document.querySelector('#handleListNav .handle-list-nav') ||
+          document.querySelector('.handle-list-nav')
+        );
+      }
+      const href = String(location.href || '');
+      const onHandle = /\\/ticket\\/handle/i.test(href);
+      if (!onHandle) {
+        location.href = ${safeUrl};
+        return { ok: true, action: 'navigate_handle' };
+      }
+      if (getListWrapper()) return { ok: true, action: 'list_ready' };
+
+      const tabCandidates = Array.from(
+        document.querySelectorAll('.filter-title, .filter-title-ishandle, .mtd-tabs-item, [role="tab"]')
+      );
+      for (const t of tabCandidates) {
+        const txt = (t.textContent || '').trim();
+        if (!txt) continue;
+        if (txt.includes('待处理') || txt.includes('未处理') || txt.includes('处理中')) {
+          t.click();
+          await sleep(500);
+          break;
+        }
+      }
+      return { ok: true, action: 'tab_click', hasList: !!getListWrapper() };
+    })();
+  `;
+}
+
+async function isTicketVisibleInDom(ticketId) {
+  if (!deps.getWebviewReady() || !deps.getTtWebview() || !ticketId) {
+    return { found: false, reason: "webview_not_ready" };
+  }
+  try {
+    const res = await ttExecuteJavaScript(buildTicketExistsInDomScript(ticketId));
+    return res && typeof res === "object" ? res : { found: false, reason: "bad_response" };
+  } catch {
+    return { found: false, reason: "script_error" };
+  }
+}
+
+/**
+ * 等待工单出现在 TT 页面 DOM（列表或详情）。API 来单早于页面渲染时使用。
+ * @param {string} ticketId
+ * @param {{ maxWaitMs?: number, intervalMs?: number, tryNudge?: boolean }} [opts]
+ */
+async function waitForTicketInDom(ticketId, opts = {}) {
+  const maxWaitMs = Number.isFinite(opts.maxWaitMs) ? opts.maxWaitMs : 60000;
+  const intervalMs = Number.isFinite(opts.intervalMs) ? opts.intervalMs : 500;
+  const tryNudge = opts.tryNudge !== false;
+  const normId = normalizeTicketId(ticketId);
+  if (!normId) return { found: false, reason: "no_id" };
+
+  const end = Date.now() + maxWaitMs;
+  let nudged = false;
+  let polls = 0;
+  while (Date.now() < end) {
+    const res = await isTicketVisibleInDom(normId);
+    if (res?.found) return { found: true, reason: res.reason || "found" };
+
+    polls += 1;
+    if (tryNudge && !nudged && polls >= 3) {
+      nudged = true;
+      try {
+        await ttExecuteJavaScript(buildNudgeTtDomListSyncScript(C.TT_WEBVIEW_DEFAULT_SRC));
+        await sleep(1500);
+      } catch {
+        // ignore
+      }
+      continue;
+    }
+
+    await sleep(intervalMs);
+  }
+
+  const last = await isTicketVisibleInDom(normId);
+  if (last?.found) return { found: true, reason: last.reason || "found" };
+  return { found: false, reason: last?.reason || "timeout" };
+}
+
 async function handleTicketClick(item, options = {}) {
   if (!deps.getTtWebview()) return false;
 
   const skipRefresh = !!options.skipRefresh;
+  const requirePending = !!options.requirePending;
 
   const clickTicketId = normalizeTicketId(item.id);
   const safeId = clickTicketId ? JSON.stringify(clickTicketId) : "null";
   const safeFp = JSON.stringify(item.fingerprint || "");
+  const safeTitle = JSON.stringify(String(item.title || "").trim());
+  const safeHandler = JSON.stringify(String(item.handler || "").trim());
+  const safeListPersonMis = JSON.stringify(listPersonMisForTicketMatch(item));
+  const safeRequirePending = requirePending ? "true" : "false";
 
   const clickScript = `
     (async () => {
@@ -1233,6 +1975,25 @@ async function handleTicketClick(item, options = {}) {
         return parseTicketNoFromRoot(detail);
       }
       function guessTicketNo(item) {
+        const attrKeys = ['data-ticket-id', 'data-id', 'data-ticketid', 'ticket-id', 'ticketid'];
+        for (const k of attrKeys) {
+          const v = norm(item.getAttribute?.(k) || '');
+          const m = v.match(/\\d{6,}/);
+          if (m) return m[0];
+        }
+        const ds = item.dataset || {};
+        for (const k of ['ticketId', 'ticketid', 'id']) {
+          const v = norm(ds[k] || '');
+          const m = v.match(/\\d{6,}/);
+          if (m) return m[0];
+        }
+        const href = norm(
+          item.getAttribute?.('href') ||
+            item.querySelector?.('a[href]')?.getAttribute?.('href') ||
+            ''
+        );
+        const hm = href.match(/(\\d{6,})/);
+        if (hm) return hm[1];
         const fromItem = parseTicketNoFromRoot(item);
         if (fromItem) return fromItem;
         const raw = norm(item.textContent || '');
@@ -1240,30 +2001,100 @@ async function handleTicketClick(item, options = {}) {
         return mid ? mid[1] : '';
       }
 
+      async function waitForListWrapper(maxWaitMs = 8000, intervalMs = 300) {
+        const endTime = Date.now() + maxWaitMs;
+        while (Date.now() < endTime) {
+          const w = getListWrapper();
+          if (w) return w;
+          await sleep(intervalMs);
+        }
+        return null;
+      }
+
       const targetId = ${safeId};
       const targetFp = ${safeFp};
-      const wrapper = getListWrapper();
-      if (!wrapper) return { ok: false, reason: 'no_list_wrapper' };
+      const targetTitle = ${safeTitle};
+      const targetHandler = ${safeHandler};
+      const targetListPersonMis = ${safeListPersonMis};
+      const requirePending = ${safeRequirePending};
 
-      function parseFp(fp) {
-        if (!fp || typeof fp !== 'string') return { fpTitle: '', fpHandler: '' };
-        const parts = fp.split('|');
-        return { fpTitle: norm(parts[0] || ''), fpHandler: norm(parts[1] || '') };
+      function guessListStatus(item) {
+        const direct =
+          norm(item.querySelector('.ticket-state-text')?.textContent || '') ||
+          norm(item.querySelector('.state')?.textContent || '');
+        if (direct) return direct;
+        const icon = item.querySelector('.ticket-state-icon');
+        if (icon?.classList.contains('ticket-state-todo')) return '未处理';
+        if (icon?.classList.contains('ticket-state-doing')) return '处理中';
+        if (icon?.classList.contains('ticket-state-pending')) return '暂停中';
+        return '';
       }
 
-      /** 列表标题与缓存不一致时仍能匹配（如「站冻库…」、改标题后前缀变长等） */
-      function titlesLooseMatch(listTitle, fpTitle) {
-        if (!listTitle || !fpTitle) return false;
-        return listTitle === fpTitle || listTitle.includes(fpTitle) || fpTitle.includes(listTitle);
+      /** 与自动接单一致：仅未处理/待处理可点；列表文案优先于图标（TT 偶发 pending 图标 + 处理中文案） */
+      function isRowPending(it) {
+        const stateText = guessListStatus(it);
+        const stateIcon = it.querySelector('.ticket-state-icon');
+        if (stateText.includes('暂停')) return false;
+        if (stateText.includes('处理中')) return false;
+        if (stateText.includes('未处理') || stateText.includes('待处理')) return true;
+        if (stateIcon?.classList.contains('ticket-state-todo')) return true;
+        if (stateIcon?.classList.contains('ticket-state-doing')) return false;
+        if (stateIcon?.classList.contains('ticket-state-pending')) return false;
+        return false;
       }
 
-      function handlersLooseMatch(listH, fpH) {
-        if (!fpH) return true;
-        if (!listH) return false;
-        return listH === fpH || listH.includes(fpH) || fpH.includes(listH);
+      function isRowActive(it) {
+        return (
+          it.classList.contains('handle-ticket-nav-item-active') ||
+          it.classList.contains('active')
+        );
       }
 
-      function guessInitiatorRow(item) {
+      function getDetailScope() {
+        return (
+          document.querySelector('#ticket-detail') ||
+          document.querySelector('.ticket-detail-container') ||
+          document.querySelector('.detail-with-list-container')
+        );
+      }
+
+      function listPersonMisMatch(listHandler) {
+        if (!targetListPersonMis) return true;
+        const h = norm(listHandler).toLowerCase().replace(/\\s+/g, '');
+        if (h.includes(targetListPersonMis)) return true;
+        const parts = h.split('/');
+        const mis = parts.length >= 2 ? parts[parts.length - 1].replace(/[^a-z0-9._-]/g, '') : '';
+        return mis === targetListPersonMis;
+      }
+
+      function detailMatchesTarget(it) {
+        const detail = getDetailScope();
+        if (!detail) return false;
+        const detailId = getActiveIdFromDetail();
+        if (targetId && detailId && String(detailId) === String(targetId)) return true;
+        const rowId = guessTicketNo(it);
+        if (rowId && detailId && String(rowId) === String(detailId)) return true;
+        return false;
+      }
+
+      async function waitRowSelected(it, maxWaitMs = 4000) {
+        const end = Date.now() + maxWaitMs;
+        while (Date.now() < end) {
+          if (isRowActive(it) && detailMatchesTarget(it)) return true;
+          if (isRowActive(it) && !getDetailScope()) {
+            await sleep(150);
+            continue;
+          }
+          await sleep(150);
+        }
+        return isRowActive(it) && detailMatchesTarget(it);
+      }
+
+      function rowPassesPendingGate(it) {
+        return !requirePending || isRowPending(it);
+      }
+
+      function guessListHandler(item) {
         const direct =
           item.querySelector('.user-name')?.textContent ||
           item.querySelector('.list-user-icon .user-wrapper .user-name')?.textContent ||
@@ -1278,29 +2109,120 @@ async function handleTicketClick(item, options = {}) {
         return m ? norm(m[1]) : '';
       }
 
+      /** 列表标题与缓存不一致时仍能匹配（如「站冻库…」、改标题后前缀变长等） */
+      function titlesLooseMatch(listTitle, fpTitle) {
+        if (!listTitle || !fpTitle) return false;
+        return listTitle === fpTitle || listTitle.includes(fpTitle) || fpTitle.includes(listTitle);
+      }
+
+      function handlersLooseMatch(listH, fpH) {
+        if (!fpH) return true;
+        if (!listH) return false;
+        return listH === fpH || listH.includes(fpH) || fpH.includes(listH);
+      }
+
+      function guessListTitle(item) {
+        return (
+          norm(item.querySelector('.ticket-name-text-display')?.textContent || '') ||
+          norm(item.querySelector('.tt-hover-field .ticket-name-text-display')?.textContent || '') ||
+          norm(item.querySelector('.content.title')?.textContent || '') ||
+          norm(item.querySelector('.title')?.textContent || '') ||
+          norm(item.querySelector('.content')?.textContent || '')
+        );
+      }
+
+      function tryClickRow(it) {
+        it.scrollIntoView({ block: 'center', behavior: 'instant' });
+        const titleEl =
+          it.querySelector('.content.title') ||
+          it.querySelector('.ticket-name-text-display') ||
+          it.querySelector('.tt-hover-field .ticket-name-text-display') ||
+          it;
+        titleEl.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+        titleEl.click();
+        if (titleEl !== it) {
+          it.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+          it.click();
+        }
+      }
+
+      async function clickMatchedRow(it, reason) {
+        if (!isRowActive(it) || !detailMatchesTarget(it)) {
+          tryClickRow(it);
+          let selected = await waitRowSelected(it, requirePending ? 4500 : 2000);
+          if (!selected) {
+            tryClickRow(it);
+            selected = await waitRowSelected(it, 2000);
+          }
+          if (!selected) {
+            return { ok: false, reason: 'click_no_active', activeId: getActiveIdFromDetail() };
+          }
+        }
+        if (!getDetailScope() || !detailMatchesTarget(it)) {
+          return { ok: false, reason: 'detail_mismatch', activeId: getActiveIdFromDetail() };
+        }
+        return { ok: true, reason, activeId: getActiveIdFromDetail() };
+      }
+
+      const activeId = getActiveIdFromDetail();
+      if (targetId && activeId && String(activeId) === String(targetId)) {
+        const earlyWrapper = getListWrapper();
+        if (earlyWrapper) {
+          const items = Array.from(earlyWrapper.querySelectorAll('.handle-ticket-nav-item'));
+          let activeRow = items.find((it) => {
+            const id = guessTicketNo(it);
+            return id && String(id) === String(targetId) && isRowActive(it);
+          });
+          if (!activeRow && targetTitle) {
+            activeRow = items.find((it) => {
+              if (!isRowActive(it)) return false;
+              const title = guessListTitle(it);
+              return title && titlesLooseMatch(title, targetTitle);
+            });
+          }
+          if (activeRow && getDetailScope()) {
+            return { ok: true, reason: 'already_active', activeId };
+          }
+        }
+      }
+
+      const wrapper = await waitForListWrapper(8000, 300);
+      if (!wrapper) return { ok: false, reason: 'no_list_wrapper' };
+
+      function parseFp(fp) {
+        if (!fp || typeof fp !== 'string') return { fpTitle: '', fpHandler: '' };
+        const parts = fp.split('|');
+        return { fpTitle: norm(parts[0] || ''), fpHandler: norm(parts[1] || '') };
+      }
+
       const maxScroll = 80;
       for (let i = 0; i < maxScroll; i += 1) {
         const items = Array.from(wrapper.querySelectorAll('.handle-ticket-nav-item'));
 
         for (const it of items) {
+          if (!rowPassesPendingGate(it)) continue;
           const id = guessTicketNo(it);
           if (targetId && id && String(id) === String(targetId)) {
-            it.scrollIntoView({ block: 'center' });
-            it.click();
-            await sleep(200);
-            return { ok: true, reason: 'clicked_by_id', activeId: getActiveIdFromDetail() };
+            return clickMatchedRow(it, 'clicked_by_id');
+          }
+        }
+
+        if (targetId && targetTitle) {
+          for (const it of items) {
+            if (!rowPassesPendingGate(it)) continue;
+            const title = guessListTitle(it);
+            if (title && titlesLooseMatch(title, targetTitle)) {
+              return clickMatchedRow(it, 'clicked_by_id_title');
+            }
           }
         }
 
         const { fpTitle, fpHandler } = parseFp(targetFp);
         for (const it of items) {
-          const title =
-            norm(it.querySelector('.ticket-name-text-display')?.textContent || '') ||
-            norm(it.querySelector('.tt-hover-field .ticket-name-text-display')?.textContent || '') ||
-            norm(it.querySelector('.content.title')?.textContent || '') ||
-            norm(it.querySelector('.title')?.textContent || '') ||
-            norm(it.querySelector('.content')?.textContent || '');
-          const listHandler = guessInitiatorRow(it);
+          if (!rowPassesPendingGate(it)) continue;
+          const title = guessListTitle(it);
+          const listHandler = guessListHandler(it);
+          if (!listPersonMisMatch(listHandler)) continue;
 
           if (
             targetFp &&
@@ -1309,10 +2231,23 @@ async function handleTicketClick(item, options = {}) {
             titlesLooseMatch(title, fpTitle) &&
             handlersLooseMatch(listHandler, fpHandler)
           ) {
-            it.scrollIntoView({ block: 'center' });
-            it.click();
-            await sleep(200);
-            return { ok: true, reason: 'clicked_by_fp', activeId: getActiveIdFromDetail() };
+            return clickMatchedRow(it, 'clicked_by_fp');
+          }
+        }
+
+        if (targetTitle) {
+          for (const it of items) {
+            if (!rowPassesPendingGate(it)) continue;
+            const title = guessListTitle(it);
+            const listHandler = guessListHandler(it);
+            if (!listPersonMisMatch(listHandler)) continue;
+            if (
+              title &&
+              titlesLooseMatch(title, targetTitle) &&
+              handlersLooseMatch(listHandler, targetHandler)
+            ) {
+              return clickMatchedRow(it, 'clicked_by_title');
+            }
           }
         }
 
@@ -1328,7 +2263,7 @@ async function handleTicketClick(item, options = {}) {
 
   const res = await ttExecuteJavaScript(clickScript);
   if (!res?.ok) {
-    log(`跳转工单失败：${res?.reason || "unknown"}`, "warning");
+    log("无法打开该工单，请稍后重试。", "warning");
     if (!skipRefresh) {
       if (await isApiPrimaryMode()) await syncActiveHighlightFromDom();
       else await refreshTickets({ reset: false });
@@ -1336,7 +2271,15 @@ async function handleTicketClick(item, options = {}) {
     return false;
   }
 
-  const activeId = normalizeTicketId(res.activeId) || clickTicketId;
+  const activeId = normalizeTicketId(res.activeId);
+  if (!activeId || (clickTicketId && activeId !== clickTicketId)) {
+    log("无法打开该工单，请稍后重试。", "warning");
+    if (!skipRefresh) {
+      if (await isApiPrimaryMode()) await syncActiveHighlightFromDom();
+      else await refreshTickets({ reset: false });
+    }
+    return false;
+  }
   syncTicketActiveState(activeId);
   return true;
 }
@@ -1445,6 +2388,7 @@ async function loadMoreTickets() {
     applyTicketFilters,
     sortTickets,
     getMyTodoTicketsForTitleOps,
+    getMyPendingTicketsForTitleOnNew,
     getTicketSelectKey,
     parsePriorityRank,
     classifyTicketTitle,
@@ -1453,8 +2397,19 @@ async function loadMoreTickets() {
     refreshTickets,
     handleTicketClick,
     syncActiveHighlightFromDom,
+    isApiPrimaryMode,
+    waitForTicketInDom,
+    isTicketVisibleInDom,
+    isTicketItemInHandleList,
     startApiTicketPollTimer,
     stopApiTicketPollTimer,
+    restartApiTicketPollTimer,
+    commitApiTicketIdBaseline,
+    commitPendingDomSyncAfterPageLoad,
+    clearPendingDomSyncForTickets,
+    isTtDomSyncPending,
+    scanHandleListForTitleWatch,
+    mapDomWatchItemToTicket,
     loadMoreTickets,
     updateTicketMeta,
     syncSortButtonText

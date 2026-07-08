@@ -114,21 +114,18 @@
 
     if (stage === "warn") {
       const remain = formatRemainingUntilOverdue(hr, settings.overdueHours);
-      log(
-        `[48h预警] ${titleShort} · 已历时 ${elapsed}（满 ${settings.warnHours}h 预警线）· ${remain}`,
-        "warning"
-      );
+      log(`⚠ 工单「${titleShort}」已处理 ${elapsed}，即将满 48 小时。`, "warning");
       if (settings.notifyWindows) {
         void window.ttDesktopApi?.showSlaNotification?.({
-          title: "工单即将满 48 小时",
+          title: "工单即将超时",
           body: `${titleShort}\n已历时 ${elapsed}\n${remain}`
         });
       }
     } else {
-      log(`[48h超时] ${titleShort} · 已历时 ${elapsed} · 已超过 ${settings.overdueHours} 小时`, "error");
+      log(`⚠ 工单「${titleShort}」已超时（已处理 ${elapsed}）。`, "error");
       if (settings.notifyWindows) {
         void window.ttDesktopApi?.showSlaNotification?.({
-          title: "工单已超过 48 小时",
+          title: "工单已超时",
           body: `${titleShort}\n已历时 ${elapsed}`
         });
       }
@@ -143,8 +140,8 @@
       } else {
         D.ticketSlaSummaryEl.hidden = false;
         const parts = [];
-        if (warnCount > 0) parts.push(`即将满 48h：${warnCount} 单`);
-        if (overdueCount > 0) parts.push(`已超时：${overdueCount} 单`);
+        if (warnCount > 0) parts.push(`${warnCount} 单即将超时`);
+        if (overdueCount > 0) parts.push(`${overdueCount} 单已超时`);
         D.ticketSlaSummaryEl.textContent = parts.join(" · ");
       }
     }
@@ -155,8 +152,8 @@
       } else {
         D.ticketSlaHeaderBadgeEl.hidden = false;
         const parts = [];
-        if (warnCount > 0) parts.push(`预警 ${warnCount}`);
-        if (overdueCount > 0) parts.push(`超时 ${overdueCount}`);
+        if (warnCount > 0) parts.push(`${warnCount} 预警`);
+        if (overdueCount > 0) parts.push(`${overdueCount} 超时`);
         D.ticketSlaHeaderBadgeEl.textContent = parts.join(" · ");
       }
     }

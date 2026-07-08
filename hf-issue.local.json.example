@@ -1,0 +1,33 @@
+{
+  "enabled": true,
+  "notifyWindows": true,
+  "thresholds": {
+    "days7": 3,
+    "days30": 5
+  },
+  "categories": [
+    {
+      "id": "network",
+      "label": "网络类",
+      "terms": [
+        "断网",
+        "网络卡顿",
+        "没网",
+        "整仓断网",
+        "网络故障",
+        "Network",
+        "network",
+        "WIFI",
+        "wifi",
+        "WiFi",
+        "offline",
+        "Offline"
+      ]
+    },
+    {
+      "id": "power",
+      "label": "电力/UPS",
+      "terms": ["断电", "UPS", "UPS故障", "停电", "power outage", "Power"]
+    }
+  ]
+}

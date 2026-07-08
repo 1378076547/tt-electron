@@ -162,6 +162,186 @@ function createWindow() {
 const TT_GUEST_PARTITION = "persist:tt-desktop-tt-guest";
 const API_CONFIG_FILENAME = "tt-api.local.json";
 const API_CONFIG_EXAMPLE = "tt-api.local.json.example";
+const HF_ISSUE_CONFIG_FILENAME = "hf-issue.local.json";
+const HF_ISSUE_CONFIG_EXAMPLE = "hf-issue.local.json.example";
+const LEGACY_HF_ISSUE_CONFIG_FILENAME = "fault-burst.local.json";
+const DEFAULT_RG_IDS = [13619, 8238, 8200, 4967];
+
+const DEFAULT_HF_ISSUE_CONFIG = {
+  enabled: true,
+  notifyWindows: true,
+  thresholds: { days7: 3, days30: 5 },
+  categories: [
+    {
+      id: "network",
+      label: "网络类",
+      terms: [
+        "断网",
+        "网络卡顿",
+        "没网",
+        "整仓断网",
+        "网络故障",
+        "Network",
+        "network",
+        "WIFI",
+        "wifi",
+        "WiFi",
+        "offline",
+        "Offline"
+      ]
+    },
+    {
+      id: "power",
+      label: "电力/UPS",
+      terms: ["断电", "UPS", "UPS故障", "停电", "power outage", "Power"]
+    }
+  ]
+};
+
+function parseRgIds(data) {
+  const raw = data?.rgIds ?? data?.RG_IDS ?? data?.rg_ids;
+  if (Array.isArray(raw)) {
+    return raw.map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0);
+  }
+  if (typeof raw === "string" && raw.trim()) {
+    return raw
+      .split(/[,，\s]+/)
+      .map((n) => Number(n.trim()))
+      .filter((n) => Number.isFinite(n) && n > 0);
+  }
+  return DEFAULT_RG_IDS.slice();
+}
+
+function getHfIssueConfigCandidatePaths() {
+  return [
+    path.join(__dirname, HF_ISSUE_CONFIG_FILENAME),
+    path.join(app.getPath("userData"), HF_ISSUE_CONFIG_FILENAME),
+    path.join(__dirname, LEGACY_HF_ISSUE_CONFIG_FILENAME),
+    path.join(app.getPath("userData"), LEGACY_HF_ISSUE_CONFIG_FILENAME)
+  ];
+}
+
+function loadLocalHfIssueConfig() {
+  for (const configPath of getHfIssueConfigCandidatePaths()) {
+    try {
+      if (!fs.existsSync(configPath)) continue;
+      const text = fs.readFileSync(configPath, "utf8").replace(/^\uFEFF/, "");
+      const data = JSON.parse(text);
+      if (!data || typeof data !== "object") {
+        return { ok: false, path: configPath, data: null, error: "JSON 须为对象" };
+      }
+      return { ok: true, path: configPath, data, error: "" };
+    } catch (err) {
+      return {
+        ok: false,
+        path: configPath,
+        data: null,
+        error: err instanceof Error ? err.message : String(err)
+      };
+    }
+  }
+  const examplePath = path.join(__dirname, HF_ISSUE_CONFIG_EXAMPLE);
+  if (fs.existsSync(examplePath)) {
+    try {
+      const text = fs.readFileSync(examplePath, "utf8").replace(/^\uFEFF/, "");
+      const data = JSON.parse(text);
+      if (data && typeof data === "object") {
+        return { ok: true, path: examplePath, data, error: "" };
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return { ok: true, path: HF_ISSUE_CONFIG_FILENAME, data: DEFAULT_HF_ISSUE_CONFIG, error: "" };
+}
+
+function getHfIssueSettings() {
+  const loaded = loadLocalHfIssueConfig();
+  const data = loaded.data || {};
+  const thresholds = data.thresholds && typeof data.thresholds === "object" ? data.thresholds : {};
+  return {
+    ok: loaded.ok,
+    path: loaded.path,
+    enabled: data.enabled !== false,
+    notifyWindows: data.notifyWindows !== false,
+    thresholds: {
+      days7: Number(thresholds.days7) > 0 ? Number(thresholds.days7) : 3,
+      days30: Number(thresholds.days30) > 0 ? Number(thresholds.days30) : 5
+    },
+    categories: Array.isArray(data.categories) ? data.categories : DEFAULT_HF_ISSUE_CONFIG.categories
+  };
+}
+
+const BURST_OUTBREAK_CONFIG_FILENAME = "burst-outbreak.local.json";
+const BURST_OUTBREAK_CONFIG_EXAMPLE = "burst-outbreak.local.json.example";
+
+const DEFAULT_BURST_OUTBREAK_CONFIG = {
+  enabled: true,
+  notifyWindows: true,
+  windowMinutes: 15,
+  minDistinctSites: 4,
+  categories: [
+    { id: "receipt_printer", label: "小票机", terms: ["小票机", "热敏", "标签机", "打印机"] },
+    { id: "network_cut", label: "断网/没网", terms: ["断网", "没网", "整仓断网", "offline", "Offline"] },
+    { id: "network", label: "网络", terms: ["网络", "网络卡顿", "Network", "network", "WIFI", "wifi", "WiFi"] },
+    { id: "pda", label: "PDA", terms: ["PDA", "pda", "扫码枪", "手持", "扫码"] }
+  ]
+};
+
+function getBurstOutbreakConfigCandidatePaths() {
+  return [
+    path.join(__dirname, BURST_OUTBREAK_CONFIG_FILENAME),
+    path.join(app.getPath("userData"), BURST_OUTBREAK_CONFIG_FILENAME)
+  ];
+}
+
+function loadLocalBurstOutbreakConfig() {
+  for (const configPath of getBurstOutbreakConfigCandidatePaths()) {
+    try {
+      if (!fs.existsSync(configPath)) continue;
+      const text = fs.readFileSync(configPath, "utf8").replace(/^\uFEFF/, "");
+      const data = JSON.parse(text);
+      if (!data || typeof data !== "object") {
+        return { ok: false, path: configPath, data: null, error: "JSON 须为对象" };
+      }
+      return { ok: true, path: configPath, data, error: "" };
+    } catch (err) {
+      return {
+        ok: false,
+        path: configPath,
+        data: null,
+        error: err instanceof Error ? err.message : String(err)
+      };
+    }
+  }
+  const examplePath = path.join(__dirname, BURST_OUTBREAK_CONFIG_EXAMPLE);
+  if (fs.existsSync(examplePath)) {
+    try {
+      const text = fs.readFileSync(examplePath, "utf8").replace(/^\uFEFF/, "");
+      const data = JSON.parse(text);
+      if (data && typeof data === "object") {
+        return { ok: true, path: examplePath, data, error: "" };
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return { ok: true, path: BURST_OUTBREAK_CONFIG_FILENAME, data: DEFAULT_BURST_OUTBREAK_CONFIG, error: "" };
+}
+
+function getBurstOutbreakSettings() {
+  const loaded = loadLocalBurstOutbreakConfig();
+  const data = loaded.data || {};
+  return {
+    ok: loaded.ok,
+    path: loaded.path,
+    enabled: data.enabled !== false,
+    notifyWindows: data.notifyWindows !== false,
+    windowMinutes: Number(data.windowMinutes) > 0 ? Number(data.windowMinutes) : 15,
+    minDistinctSites: Number(data.minDistinctSites) > 0 ? Number(data.minDistinctSites) : 4,
+    categories: Array.isArray(data.categories) ? data.categories : DEFAULT_BURST_OUTBREAK_CONFIG.categories
+  };
+}
 
 function sanitizeUsername(raw) {
   const s = String(raw || "")
@@ -221,10 +401,12 @@ function getApiCredentials() {
     .trim()
     .toLowerCase();
   const env = envRaw === "test" ? "test" : "prod";
+  const rgIds = parseRgIds(data);
   return {
     authorization,
     username,
     env,
+    rgIds,
     configPath: loaded.path || getDefaultApiConfigPath(),
     configLoaded: loaded.ok,
     configError: loaded.error || ""
@@ -415,7 +597,34 @@ ipcMain.handle("get-tt-api-config-status", async () => {
     configPath: creds.configPath,
     env: creds.env,
     hasUsername: !!creds.username,
+    username: creds.username || "",
+    rgIds: creds.rgIds,
     message: creds.authorization ? "" : getApiConfigHint()
+  };
+});
+
+ipcMain.handle("get-hf-issue-config", async () => {
+  const cfg = getHfIssueSettings();
+  return {
+    ok: cfg.ok,
+    path: cfg.path,
+    enabled: cfg.enabled,
+    notifyWindows: cfg.notifyWindows,
+    thresholds: cfg.thresholds,
+    categories: cfg.categories
+  };
+});
+
+ipcMain.handle("get-burst-outbreak-config", async () => {
+  const cfg = getBurstOutbreakSettings();
+  return {
+    ok: cfg.ok,
+    path: cfg.path,
+    enabled: cfg.enabled,
+    notifyWindows: cfg.notifyWindows,
+    windowMinutes: cfg.windowMinutes,
+    minDistinctSites: cfg.minDistinctSites,
+    categories: cfg.categories
   };
 });
 

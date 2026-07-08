@@ -56,6 +56,10 @@
     ticketSlaSummaryEl: document.getElementById("ticketSlaSummary"),
     ticketSlaHeaderBadgeEl: document.getElementById("ticketSlaHeaderBadge"),
     ticketSlaReminderToggle: document.getElementById("ticketSlaReminderToggle"),
-    ticketSlaNotifyToggle: document.getElementById("ticketSlaNotifyToggle")
+    ticketSlaNotifyToggle: document.getElementById("ticketSlaNotifyToggle"),
+    hfIssueHeaderBadgeEl: document.getElementById("hfIssueHeaderBadge"),
+    hfIssueSummaryEl: document.getElementById("hfIssueSummary"),
+    burstOutbreakHeaderBadgeEl: document.getElementById("burstOutbreakHeaderBadge"),
+    burstOutbreakSummaryEl: document.getElementById("burstOutbreakSummary")
   };
 })(window.TTDesktop);

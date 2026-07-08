@@ -41,19 +41,19 @@
     },
 
     msgPmBlocked() {
-      return "正在批量设置优先级，请稍后再试「按地区拉PM」。";
+      return "正在批量设置优先级，请稍后再试拉人。";
     },
 
     msgPriorityBlockedByPm() {
-      return "正在按地区拉 PM，请稍后再试批量设置优先级。";
+      return "正在拉人，请稍后再试批量设置优先级。";
     },
 
     msgTitleNormalizeBlocked() {
-      return "请等待「标题检测」完成后再试。";
+      return "请等待标题检测完成后再试。";
     },
 
     msgPmBlockedByBusy() {
-      return "自动处理正在执行脚本，请等待本轮结束后再试「按地区拉PM」。";
+      return "自动接单进行中，请等待本轮结束后再试拉人。";
     }
   };
 })(window.TTDesktop);
