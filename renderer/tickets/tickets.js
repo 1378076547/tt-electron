@@ -1057,11 +1057,13 @@ async function refreshTickets({ reset = false, apiOnly = false } = {}) {
       };
       if (ticketOnlyMine && includeAssigneeFilter) {
         // 在接口层直接收敛“只看我的工单”，避免拉回后前端再过滤仍出现同组他人单
-        p.assignee = getHandler();
-        p.assigneeMis = getHandler();
-        p.handlerMis = getHandler();
-        p.processorMis = getHandler();
-        p.dealUserMis = getHandler();
+        const me = getHandler();
+        p.assigned = me;
+        p.assignee = me;
+        p.assigneeMis = me;
+        p.handlerMis = me;
+        p.processorMis = me;
+        p.dealUserMis = me;
       }
       if (ticketHideClosed) {
         // 「我的待处理」包含暂停中，避免与 TT 右侧计数不一致
@@ -1128,11 +1130,37 @@ async function refreshTickets({ reset = false, apiOnly = false } = {}) {
 
     let domExtra = [];
 
+    async function pullDomTicketRows(activeIdHint = "") {
+      if (apiOnly || !deps.getWebviewReady() || !deps.getTtWebview()) return { rows: [], activeId: activeIdHint };
+      try {
+        const payload = await ttExecuteJavaScript(buildExtractTicketsScript());
+        const items = Array.isArray(payload?.items) ? payload.items : [];
+        const activeId = normalizeTicketId(payload?.activeId) || activeIdHint || "";
+        const rows = items.map((x) => {
+          const t = mapToTicketItem(x, activeId);
+          if (ticketOnlyMine) {
+            const me = String(getHandler() || "").trim();
+            if (me) {
+              if (!t.ownerMis) t.ownerMis = me;
+              if (!t.assigneeMis) t.assigneeMis = me;
+            }
+          }
+          return t;
+        });
+        return { rows, activeId };
+      } catch {
+        return { rows: [], activeId: activeIdHint };
+      }
+    }
+
     if (apiPrimary && usedApi) {
       applyMineOwnerFallback(mapped);
 
       const pendingHint = deps.getPendingCount?.();
-      if (ticketOnlyMine && Number.isFinite(pendingHint) && pendingHint > mapped.length) {
+      const needRelaxedAssignee =
+        ticketOnlyMine &&
+        ((Number.isFinite(pendingHint) && pendingHint > mapped.length) || mapped.length <= 1);
+      if (needRelaxedAssignee) {
         const relaxedParams = buildBaseApiParams({ includeAssigneeFilter: false });
         const { apiList: relaxedList } = await fetchApiListFromParams(relaxedParams);
         if (relaxedList.length) {
@@ -1153,8 +1181,24 @@ async function refreshTickets({ reset = false, apiOnly = false } = {}) {
         }
       }
 
+      activeId = "";
+      const domPull = await pullDomTicketRows("");
+      domExtra = domPull.rows;
+      activeId = domPull.activeId;
+      if (domExtra.length) {
+        const prevLen = mapped.length;
+        mapped = unionApiDomTickets(mapped, domExtra);
+        if (mapped.length > prevLen && domExtra.length > prevLen) {
+          log(`API 与 TT 页面工单数不一致，已用页面数据补齐（${prevLen} → ${mapped.length}）。`, "muted");
+        }
+      }
+
+      if (!reset) {
+        mapped = preserveTicketsMissingFromMapped(mapped);
+      }
+
       tickets = dedupeTicketsForDisplay(mapped);
-      activeId = await fetchActiveIdFromDom();
+      if (!activeId) activeId = await fetchActiveIdFromDom();
     } else if (apiPrimary && !usedApi) {
       const failed = results.find((r) => r && r.ok === false && r.message);
       if (failed?.message) log("工单数据获取失败，正在重试…", "warning");
@@ -1163,24 +1207,9 @@ async function refreshTickets({ reset = false, apiOnly = false } = {}) {
     }
 
     if (!apiPrimary || (apiPrimary && !usedApi)) {
-      try {
-        const payload = await ttExecuteJavaScript(buildExtractTicketsScript());
-        const items = Array.isArray(payload?.items) ? payload.items : [];
-        activeId = normalizeTicketId(payload?.activeId) || "";
-        domExtra = items.map((x) => {
-          const t = mapToTicketItem(x, activeId);
-          if (ticketOnlyMine) {
-            const me = String(getHandler() || "").trim();
-            if (me) {
-              if (!t.ownerMis) t.ownerMis = me;
-              if (!t.assigneeMis) t.assigneeMis = me;
-            }
-          }
-          return t;
-        });
-      } catch {
-        // ignore DOM failure
-      }
+      const domPull = await pullDomTicketRows("");
+      domExtra = domPull.rows;
+      activeId = domPull.activeId;
 
       if (!usedApi && results) {
         const failed = results.find((r) => r && r.ok === false && r.message);
