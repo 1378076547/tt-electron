@@ -37,7 +37,8 @@
     },
     "win": {
       "target": "nsis",
-      "icon": "assets/cat.png"
+      "icon": "assets/cat.png",
+      "artifactName": "TTDesktop1.0-Setup-${version}.${ext}"
     },
     "nsis": {
       "oneClick": false,

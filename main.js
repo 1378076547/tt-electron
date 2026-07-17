@@ -87,6 +87,13 @@ function createAppMenu() {
         },
         { type: "separator" },
         {
+          label: "检查更新…",
+          click: () => {
+            checkForUpdates(true);
+          }
+        },
+        { type: "separator" },
+        {
           label: "开发者工具",
           role: "toggleDevTools"
         }
@@ -862,6 +869,20 @@ ipcMain.handle("tt-api-ticket-detail", async (_event, payload) => {
 });
 
 // ─── 自动更新 ────────────────────────────────────────────────────────────────
+let updateCheckManual = false;
+
+function logUpdateEvent(message, err) {
+  const line = err
+    ? `[update] ${message}: ${err instanceof Error ? err.message : String(err)}`
+    : `[update] ${message}`;
+  console.log(line);
+  try {
+    const { dir, filePath } = getLogFilePath();
+    fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(filePath, `${new Date().toISOString()} ${line}\n`, "utf8");
+  } catch (_) {}
+}
+
 // 不自动下载，让用户自己决定是否更新
 autoUpdater.autoDownload = false;
 // 退出时自动安装已下载的更新
@@ -869,6 +890,7 @@ autoUpdater.autoInstallOnAppQuit = true;
 
 // 发现新版本 → 弹窗询问用户
 autoUpdater.on("update-available", (info) => {
+  updateCheckManual = false;
   if (!mainWindow) return;
   dialog.showMessageBox(mainWindow, {
     type: "info",
@@ -885,8 +907,18 @@ autoUpdater.on("update-available", (info) => {
   });
 });
 
-// 没有新版本 → 静默，不打扰用户
-autoUpdater.on("update-not-available", () => {});
+// 没有新版本 → 手动检查时提示，启动时静默
+autoUpdater.on("update-not-available", (info) => {
+  if (!updateCheckManual || !mainWindow) return;
+  updateCheckManual = false;
+  dialog.showMessageBox(mainWindow, {
+    type: "info",
+    title: "检查更新",
+    message: "当前已是最新版本",
+    detail: `TTDesktop1.0 v${info?.version || app.getVersion()}`,
+    buttons: ["确定"]
+  });
+});
 
 // 下载进度 → 发给渲染进程（可选，用于显示进度条）
 autoUpdater.on("download-progress", (progress) => {
@@ -912,16 +944,57 @@ autoUpdater.on("update-downloaded", () => {
   });
 });
 
-// 更新出错 → 静默失败，不影响正常使用
-autoUpdater.on("error", () => {});
+// 更新出错 → 记录日志；手动检查时弹窗提示
+autoUpdater.on("error", (err) => {
+  logUpdateEvent("检查或下载失败", err);
+  if (!updateCheckManual || !mainWindow) return;
+  updateCheckManual = false;
+  dialog.showMessageBox(mainWindow, {
+    type: "warning",
+    title: "检查更新失败",
+    message: "暂时无法检查更新",
+    detail: err instanceof Error ? err.message : String(err || "未知错误"),
+    buttons: ["确定"]
+  });
+});
 
 // 检查更新（仅打包后的正式版本才检查，开发模式跳过）
-function checkForUpdates() {
-  if (!app.isPackaged) return;
+function checkForUpdates(manual = false) {
+  if (!app.isPackaged) {
+    if (manual && mainWindow) {
+      dialog.showMessageBox(mainWindow, {
+        type: "info",
+        title: "检查更新",
+        message: "开发模式不支持检查更新",
+        detail: "请使用打包后的安装版验证自动更新。",
+        buttons: ["确定"]
+      });
+    }
+    return;
+  }
+  updateCheckManual = manual;
+  const run = () => {
+    logUpdateEvent(manual ? "手动检查更新" : "启动后自动检查更新");
+    autoUpdater.checkForUpdates().catch((err) => {
+      logUpdateEvent("checkForUpdates 调用失败", err);
+      if (manual && mainWindow) {
+        updateCheckManual = false;
+        dialog.showMessageBox(mainWindow, {
+          type: "warning",
+          title: "检查更新失败",
+          message: "暂时无法检查更新",
+          detail: err instanceof Error ? err.message : String(err),
+          buttons: ["确定"]
+        });
+      }
+    });
+  };
+  if (manual) {
+    run();
+    return;
+  }
   // 延迟 5 秒再检查，避免与启动时的 TT 页面加载争抢资源
-  setTimeout(() => {
-    autoUpdater.checkForUpdates().catch(() => {});
-  }, 5000);
+  setTimeout(run, 5000);
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
