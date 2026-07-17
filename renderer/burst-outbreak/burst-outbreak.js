@@ -275,7 +275,7 @@
         D.burstOutbreakHeaderBadgeEl.textContent = "";
       } else {
         D.burstOutbreakHeaderBadgeEl.hidden = false;
-        D.burstOutbreakHeaderBadgeEl.textContent = `爆发 ${list.length}`;
+        D.burstOutbreakHeaderBadgeEl.textContent = `短时批量 ${list.length}`;
       }
     }
     if (D.burstOutbreakSummaryEl) {
@@ -285,7 +285,7 @@
       } else {
         D.burstOutbreakSummaryEl.hidden = false;
         const lines = list.map((a) => {
-          return `${a.categoryLabel}：${a.windowMinutes}分钟内 ${a.distinctSites} 站 / ${a.ticketCount} 单`;
+          return `[短时批量·多站] ${a.categoryLabel}：${a.windowMinutes}分钟内 ${a.distinctSites} 站 / ${a.ticketCount} 单`;
         });
         D.burstOutbreakSummaryEl.textContent = lines.join(" ｜ ");
       }
@@ -303,16 +303,17 @@
     if (Date.now() - last < NOTIFY_COOLDOWN_MS) return;
     notifyCooldown.set(key, Date.now());
     void window.ttDesktopApi?.showSlaNotification?.({
-      title: `批量故障预警：${alert.categoryLabel}`,
+      title: `短时批量·多站同类：${alert.categoryLabel}`,
       body: `${alert.windowMinutes}分钟内 ${alert.distinctSites} 个不同站点 / ${alert.ticketCount} 单\n${formatSiteList(alert.siteLabels, 4)}\n${formatIdList(alert.openTicketIds, 5)}`
     });
   }
 
   function logActiveAlert(alert, { isNew = false } = {}) {
-    const head = isNew ? "⚠ 批量故障预警" : "⚠ 批量故障";
+    const head = isNew ? "⚠ 短时批量故障预警（多站同类）" : "⚠ 短时批量故障（多站同类）";
     log(
-      `${head}：${alert.windowMinutes} 分钟内 ${alert.distinctSites} 个站点出现${alert.categoryLabel}\n` +
-        `  涉及工单 ${alert.ticketCount} 单\n` +
+      `${head}：${alert.categoryLabel}\n` +
+        `  类型：${alert.windowMinutes} 分钟窗口内 ≥${alert.minDistinctSites} 个不同站点同时报同类障（非单站反复）\n` +
+        `  ${alert.windowMinutes} 分钟内 ${alert.distinctSites} 个站点 / ${alert.ticketCount} 单\n` +
         `  站点：${formatSiteList(alert.siteLabels, 8)}\n` +
         `  工单：${formatIdList(alert.openTicketIds)}`,
       "error"
@@ -340,7 +341,7 @@
 
       const rgIds = await getRgIds();
       if (!rgIds.length) {
-        log("批量故障检测未启用：请在设置中配置工单组。", "warning");
+        log("短时批量故障检测未启用：请在设置中配置工单组。", "warning");
         return;
       }
 
@@ -389,7 +390,7 @@
 
         if (!hit) {
           if (activeAlerts.has(catId)) {
-            log(`批量故障已恢复：${bucket.category.label}。`, "success");
+            log(`短时批量故障已恢复：${bucket.category.label}。`, "success");
           }
           continue;
         }
@@ -420,7 +421,7 @@
       for (const catId of activeAlerts.keys()) {
         if (!nextActive.has(catId)) {
           const prev = activeAlerts.get(catId);
-          log(`批量故障已恢复：${prev?.categoryLabel || catId}。`, "success");
+          log(`短时批量故障已恢复：${prev?.categoryLabel || catId}。`, "success");
         }
       }
 
@@ -428,7 +429,7 @@
       updateBurstOutbreakUi();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      log("批量故障检测异常，请稍后重试。", "warning");
+      log("短时批量故障检测异常，请稍后重试。", "warning");
     } finally {
       scanInFlight = false;
     }

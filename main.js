@@ -51,6 +51,15 @@ function createAppMenu() {
           }
         },
         {
+          label: "API 设置…",
+          click: () => {
+            if (!mainWindow) return;
+            mainWindow.show();
+            mainWindow.focus();
+            mainWindow.webContents.send("open-api-settings");
+          }
+        },
+        {
           label: "打开 API 配置文件",
           click: () => {
             openApiConfigFile().catch(() => {});
@@ -418,12 +427,12 @@ function getApiConfigHint() {
   if (creds.authorization) return "";
   const p = creds.configPath;
   if (creds.configError) {
-    return `API 配置文件 JSON 无效（${p}）：${creds.configError}`;
+    return `API 配置文件无效（${p}）：${creds.configError}。请点击「API 设置」重新填写。`;
   }
   if (!creds.configLoaded) {
-    return `API 未配置：请编辑 ${p}（可复制 ${API_CONFIG_EXAMPLE} 为 ${API_CONFIG_FILENAME}）`;
+    return `API 未配置：请点击「API 设置」填写令牌与 MIS（配置文件：${p}）`;
   }
-  return `API 未配置：请在 ${p} 中填写 authorization`;
+  return `API 未配置：请点击「API 设置」填写 authorization`;
 }
 
 function ensureApiConfigFile() {
@@ -438,6 +447,62 @@ function ensureApiConfigFile() {
     // ignore
   }
   return target;
+}
+
+/** 解析表单/字符串中的 rgIds */
+function parseRgIdsInput(raw) {
+  if (Array.isArray(raw)) {
+    return raw.map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0);
+  }
+  const s = String(raw || "").trim();
+  if (!s) return [];
+  return s
+    .split(/[,，\s]+/)
+    .map((n) => Number(String(n).trim()))
+    .filter((n) => Number.isFinite(n) && n > 0);
+}
+
+/**
+ * 将 API 配置写入默认路径（UTF-8 无 BOM，合法 JSON）
+ * @param {{ authorization?: string, username?: string, env?: string, rgIds?: string|number[] }} payload
+ */
+function saveApiConfigFromForm(payload) {
+  const authorization = String(payload?.authorization || "").trim();
+  const username = sanitizeUsername(payload?.username || "");
+  const envRaw = String(payload?.env || "prod")
+    .trim()
+    .toLowerCase();
+  const env = envRaw === "test" ? "test" : "prod";
+  let rgIds = parseRgIdsInput(payload?.rgIds);
+  if (!rgIds.length) {
+    rgIds = DEFAULT_RG_IDS.slice();
+  }
+
+  if (!authorization) {
+    return { ok: false, path: getDefaultApiConfigPath(), message: "请填写 authorization 令牌" };
+  }
+  if (!username) {
+    return { ok: false, path: getDefaultApiConfigPath(), message: "请填写 username（MIS）" };
+  }
+
+  const configPath = getDefaultApiConfigPath();
+  try {
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    const data = { authorization, username, env, rgIds };
+    fs.writeFileSync(configPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+    return {
+      ok: true,
+      path: configPath,
+      message: "API 配置已保存，下次拉单即生效。",
+      data: { authorization, username, env, rgIds }
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      path: configPath,
+      message: err instanceof Error ? err.message : String(err)
+    };
+  }
 }
 
 async function openApiConfigFile() {
@@ -601,6 +666,47 @@ ipcMain.handle("get-tt-api-config-status", async () => {
     rgIds: creds.rgIds,
     message: creds.authorization ? "" : getApiConfigHint()
   };
+});
+
+ipcMain.handle("get-tt-api-config", async () => {
+  const loaded = loadLocalApiConfig();
+  const creds = getApiCredentials();
+  const data = loaded.data || {};
+  const authorization = String(
+    data.authorization || data.TT_API_AUTHORIZATION || ""
+  ).trim();
+  const username = sanitizeUsername(
+    data.username || data.TT_API_USERNAME || creds.username || ""
+  );
+  const envRaw = String(data.env || data.TT_API_ENV || creds.env || "prod")
+    .trim()
+    .toLowerCase();
+  const env = envRaw === "test" ? "test" : "prod";
+  const fileRg = parseRgIdsInput(data.rgIds ?? data.RG_IDS ?? data.rg_ids);
+  const rgIds = fileRg.length ? fileRg : creds.rgIds || DEFAULT_RG_IDS.slice();
+  return {
+    ok: loaded.ok && !!authorization,
+    path: loaded.path || getDefaultApiConfigPath(),
+    configError: loaded.error || "",
+    authorization,
+    username,
+    env,
+    rgIds,
+    rgIdsText: rgIds.join(", "),
+    message: authorization ? "" : getApiConfigHint()
+  };
+});
+
+ipcMain.handle("save-tt-api-config", async (_event, payload) => {
+  try {
+    return saveApiConfigFromForm(payload || {});
+  } catch (err) {
+    return {
+      ok: false,
+      path: getDefaultApiConfigPath(),
+      message: err instanceof Error ? err.message : String(err)
+    };
+  }
 });
 
 ipcMain.handle("get-hf-issue-config", async () => {

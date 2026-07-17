@@ -60,6 +60,19 @@
     hfIssueHeaderBadgeEl: document.getElementById("hfIssueHeaderBadge"),
     hfIssueSummaryEl: document.getElementById("hfIssueSummary"),
     burstOutbreakHeaderBadgeEl: document.getElementById("burstOutbreakHeaderBadge"),
-    burstOutbreakSummaryEl: document.getElementById("burstOutbreakSummary")
+    burstOutbreakSummaryEl: document.getElementById("burstOutbreakSummary"),
+    apiSettingsBtn: document.getElementById("apiSettingsBtn"),
+    apiSettingsModal: document.getElementById("apiSettingsModal"),
+    apiSettingsCloseBtn: document.getElementById("apiSettingsCloseBtn"),
+    apiSettingsCancelBtn: document.getElementById("apiSettingsCancelBtn"),
+    apiSettingsSaveBtn: document.getElementById("apiSettingsSaveBtn"),
+    apiSettingsOpenFileBtn: document.getElementById("apiSettingsOpenFileBtn"),
+    apiAuthInput: document.getElementById("apiAuthInput"),
+    apiUsernameInput: document.getElementById("apiUsernameInput"),
+    apiEnvSelect: document.getElementById("apiEnvSelect"),
+    apiRgIdsList: document.getElementById("apiRgIdsList"),
+    apiRgIdsAddBtn: document.getElementById("apiRgIdsAddBtn"),
+    apiSettingsPath: document.getElementById("apiSettingsPath"),
+    apiSettingsError: document.getElementById("apiSettingsError")
   };
 })(window.TTDesktop);

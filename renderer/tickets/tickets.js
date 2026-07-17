@@ -1705,8 +1705,11 @@ function scheduleDeferredTtDomSync(reason, targets) {
         deps.requestTitleOnNewAfterRefresh?.();
         return;
       }
-      log(`发现 ${rows.length} 条新工单，等待自动接单…`, "info");
-      deps.requestBatchPageRefresh?.(reason);
+      log(`发现 ${rows.length} 条新工单，正在刷新页面以同步列表…`, "info");
+      const ok = deps.requestBatchPageRefresh?.(reason);
+      if (!ok) {
+        deps.requestTtWebviewReload?.(reason === "api_new_ticket" ? "api_new_ticket" : reason);
+      }
     })();
     return;
   }

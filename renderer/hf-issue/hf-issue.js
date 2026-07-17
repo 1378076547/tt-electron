@@ -479,11 +479,12 @@
     const th7 = cfg.thresholds.days7;
     const th30 = cfg.thresholds.days30;
     const level = alert.count7 >= th7 || alert.count30 >= th30 ? "error" : "warning";
-    const head = isNew ? "⚠ 高频问题预警" : "⚠ 高频问题";
+    const head = isNew ? "⚠ 高频问题预警（单站反复）" : "⚠ 高频问题（单站反复）";
     log(
-      `${head}：${alert.siteKey} 近期 ${alert.categoryLabel} 频发\n` +
-        `  7 天内 ${alert.count7} 单（超 ${th7} 单预警线）${thresholdFlag(alert.count7, th7)}\n` +
-        `  30 天内 ${alert.count30} 单（超 ${th30} 单预警线）${thresholdFlag(alert.count30, th30)}\n` +
+      `${head}：${alert.siteKey} · ${alert.categoryLabel}\n` +
+        `  类型：同一站点在 7/30 天内反复报同类障（非短时多站爆发）\n` +
+        `  7 天内 ${alert.count7} 单（预警线 ≥${th7}）${thresholdFlag(alert.count7, th7)}\n` +
+        `  30 天内 ${alert.count30} 单（预警线 ≥${th30}）${thresholdFlag(alert.count30, th30)}\n` +
         `  相关工单：${formatIdList(alert.openTicketIds)}`,
       level
     );
@@ -497,7 +498,7 @@
         D.hfIssueHeaderBadgeEl.textContent = "";
       } else {
         D.hfIssueHeaderBadgeEl.hidden = false;
-        D.hfIssueHeaderBadgeEl.textContent = `高频 ${list.length}`;
+        D.hfIssueHeaderBadgeEl.textContent = `高频单站 ${list.length}`;
       }
     }
     if (D.hfIssueSummaryEl) {
@@ -507,7 +508,7 @@
       } else {
         D.hfIssueSummaryEl.hidden = false;
         const lines = list.map((a) => {
-          return `${a.siteKey} · ${a.categoryLabel}：7天 ${a.count7}单 / 30天 ${a.count30}单`;
+          return `[高频·单站] ${a.siteKey} · ${a.categoryLabel}：7天 ${a.count7}单 / 30天 ${a.count30}单`;
         });
         D.hfIssueSummaryEl.textContent = lines.join(" ｜ ");
       }
@@ -525,7 +526,7 @@
     if (Date.now() - last < NOTIFY_COOLDOWN_MS) return;
     notifyCooldown.set(key, Date.now());
     void window.ttDesktopApi?.showSlaNotification?.({
-      title: `高频问题预警：${alert.categoryLabel}`,
+      title: `高频问题·单站反复：${alert.categoryLabel}`,
       body: `${alert.siteKey}\n7天 ${alert.count7} 单 / 30天 ${alert.count30} 单\n${formatIdList(alert.openTicketIds, 5)}`
     });
   }

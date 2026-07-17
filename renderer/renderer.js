@@ -78,7 +78,20 @@ const {
   hfIssueHeaderBadgeEl,
   hfIssueSummaryEl,
   burstOutbreakHeaderBadgeEl,
-  burstOutbreakSummaryEl
+  burstOutbreakSummaryEl,
+  apiSettingsBtn,
+  apiSettingsModal,
+  apiSettingsCloseBtn,
+  apiSettingsCancelBtn,
+  apiSettingsSaveBtn,
+  apiSettingsOpenFileBtn,
+  apiAuthInput,
+  apiUsernameInput,
+  apiEnvSelect,
+  apiRgIdsList,
+  apiRgIdsAddBtn,
+  apiSettingsPath,
+  apiSettingsError
 } = TD.dom;
 
 const log = TD.log.log;
@@ -1059,8 +1072,20 @@ function requestAcceptAfterTitle() {
 function requestBatchPageRefresh(reason = "api_new_ticket") {
   if (!running || !ttWebview) return false;
   if (pendingRunAfterReload) return true;
-  if (isNormalizeInProgress()) return true;
+  // 改标题进行中不能空返回：否则列表永远不刷、改标题一直等列表
+  if (isNormalizeInProgress()) {
+    const syncReason =
+      reason === "api_new_ticket" || reason === "dom_lag" || reason === "no_list_wrapper"
+        ? reason
+        : "api_new_ticket";
+    return requestTtWebviewReload(syncReason);
+  }
   if (batchInProgress || busy) {
+    requestTtWebviewReload(
+      reason === "api_new_ticket" || reason === "dom_lag" || reason === "no_list_wrapper"
+        ? reason
+        : "api_new_ticket"
+    );
     return true;
   }
   startBatchIfNeeded(reason === "api_new_ticket" ? "API 来新单" : String(reason || "同步"));
@@ -1088,10 +1113,12 @@ function handleBatchResult(result) {
 
   const status = result?.status || "unknown";
   if (status === "title_pending") {
+    // 标题卡在「等列表」时先强制同步 TT，避免只空等刷新间隔
+    requestTtWebviewReload("api_new_ticket");
     setTimeout(() => {
       if (!running || !batchInProgress) return;
       refreshPageThenRunCheck();
-    }, 2000);
+    }, 2500);
     return;
   }
 
@@ -1207,7 +1234,9 @@ function requestTtWebviewReload(reason = "sync") {
   const isNewTicket = reason === "api_new_ticket" || reason === "dom_lag" || reason === "no_list_wrapper";
   const now = Date.now();
 
-  if (isNormalizeInProgress() && reason !== "batch_next") {
+  // 来单同步（api_new_ticket/dom_lag/no_list_wrapper）允许在改标题中打断：
+  // 改标题必须等列表出现，若此时禁止 F5 会形成死锁。
+  if (isNormalizeInProgress() && reason !== "batch_next" && !isNewTicket) {
     ttSyncReloadQueued = true;
     ttSyncReloadQueuedReason = reason;
     return false;
@@ -1327,6 +1356,48 @@ function toggleStartStop() {
 
 function bindEvents() {
   if (startBtn) startBtn.addEventListener("change", toggleStartStop);
+  if (apiSettingsBtn) apiSettingsBtn.addEventListener("click", () => openApiSettingsModal());
+  if (apiSettingsCloseBtn) apiSettingsCloseBtn.addEventListener("click", closeApiSettingsModal);
+  if (apiSettingsCancelBtn) apiSettingsCancelBtn.addEventListener("click", closeApiSettingsModal);
+  if (apiRgIdsAddBtn) apiRgIdsAddBtn.addEventListener("click", () => appendApiRgIdRow(""));
+  if (apiSettingsSaveBtn) {
+    apiSettingsSaveBtn.addEventListener("click", () => {
+      saveApiSettingsFromForm().catch(() => {});
+    });
+  }
+  if (apiSettingsOpenFileBtn) {
+    apiSettingsOpenFileBtn.addEventListener("click", async () => {
+      try {
+        const r = await window.ttDesktopApi?.openTtApiConfig?.();
+        if (r?.ok === false) {
+          setApiSettingsError(r.message || "无法打开配置文件");
+        } else if (r?.path && apiSettingsPath) {
+          apiSettingsPath.textContent = `配置文件：${r.path}`;
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setApiSettingsError(`打开失败：${msg}`);
+      }
+    });
+  }
+  if (apiSettingsModal) {
+    apiSettingsModal.addEventListener("click", (e) => {
+      const t = e.target;
+      if (t && t.getAttribute && t.getAttribute("data-api-settings-close") === "1") {
+        closeApiSettingsModal();
+      }
+    });
+  }
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && apiSettingsModal && !apiSettingsModal.hidden) {
+      closeApiSettingsModal();
+    }
+  });
+  if (typeof window.ttDesktopApi?.onOpenApiSettings === "function") {
+    window.ttDesktopApi.onOpenApiSettings(() => {
+      openApiSettingsModal().catch(() => {});
+    });
+  }
   if (templatesSaveBtn) templatesSaveBtn.addEventListener("click", saveTemplatesModal);
   if (templatesAddRuleBtn) templatesAddRuleBtn.addEventListener("click", addRule);
   if (templatesPreviewBtn) {
@@ -1724,12 +1795,174 @@ async function logTtApiConfigStatus() {
     const st = await window.ttDesktopApi?.getTtApiConfigStatus?.();
     if (!st) return;
     if (st.ok) {
-      log("工单接口已配置，可以开始使用。", "success");
+      const mis = st.username ? `（MIS：${st.username}）` : "";
+      log(`工单接口已配置${mis}，可以开始使用。`, "success");
     } else {
-      log("工单接口未配置，部分功能不可用。", "warning");
+      const detail = st.message ? `：${st.message}` : "。";
+      log(`工单接口未配置${detail}请点击右上角「API 设置」填写。`, "warning");
     }
   } catch {
     // ignore
+  }
+}
+
+function setApiSettingsError(msg) {
+  if (!apiSettingsError) return;
+  const text = String(msg || "").trim();
+  if (!text) {
+    apiSettingsError.hidden = true;
+    apiSettingsError.textContent = "";
+    return;
+  }
+  apiSettingsError.hidden = false;
+  apiSettingsError.textContent = text;
+}
+
+function closeApiSettingsModal() {
+  if (!apiSettingsModal) return;
+  apiSettingsModal.hidden = true;
+  setApiSettingsError("");
+}
+
+function appendApiRgIdRow(value = "", { focus = true } = {}) {
+  if (!apiRgIdsList) return null;
+  const row = document.createElement("div");
+  row.className = "api-rgids-row";
+  row.setAttribute("role", "listitem");
+
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "api-rgids-row-input";
+  input.inputMode = "numeric";
+  input.autocomplete = "off";
+  input.placeholder = "例如 13619";
+  input.value = String(value || "").trim();
+
+  const removeBtn = document.createElement("button");
+  removeBtn.type = "button";
+  removeBtn.className = "api-rgids-row-remove";
+  removeBtn.setAttribute("aria-label", "删除此工单组");
+  removeBtn.textContent = "×";
+  removeBtn.addEventListener("click", () => {
+    row.remove();
+  });
+
+  row.append(input, removeBtn);
+  apiRgIdsList.append(row);
+  if (focus) input.focus();
+  return input;
+}
+
+function renderApiRgIdRows(ids) {
+  if (!apiRgIdsList) return;
+  apiRgIdsList.innerHTML = "";
+  const list = Array.isArray(ids) ? ids : [];
+  const uniq = [];
+  for (const raw of list) {
+    const n = Number(String(raw || "").trim());
+    if (!Number.isFinite(n) || n <= 0) continue;
+    if (uniq.includes(n)) continue;
+    uniq.push(n);
+  }
+  if (!uniq.length) return;
+  for (const id of uniq) {
+    appendApiRgIdRow(String(id), { focus: false });
+  }
+}
+
+function collectApiRgIdsFromForm() {
+  if (!apiRgIdsList) return [];
+  const inputs = apiRgIdsList.querySelectorAll(".api-rgids-row-input");
+  const out = [];
+  for (const el of inputs) {
+    const n = Number(String(el.value || "").trim());
+    if (!Number.isFinite(n) || n <= 0) continue;
+    if (!out.includes(n)) out.push(n);
+  }
+  return out;
+}
+
+function parseRgIdsFromConfig(cfg) {
+  if (Array.isArray(cfg?.rgIds) && cfg.rgIds.length) {
+    return cfg.rgIds.map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0);
+  }
+  const text = String(cfg?.rgIdsText || "").trim();
+  if (!text) return [];
+  return text
+    .split(/[,，\s]+/)
+    .map((s) => Number(String(s).trim()))
+    .filter((n) => Number.isFinite(n) && n > 0);
+}
+
+async function openApiSettingsModal() {
+  if (!apiSettingsModal) return;
+  setApiSettingsError("");
+  apiSettingsModal.hidden = false;
+  try {
+    const cfg = await window.ttDesktopApi?.getTtApiConfig?.();
+    if (apiAuthInput) apiAuthInput.value = cfg?.authorization || "";
+    if (apiUsernameInput) {
+      apiUsernameInput.value = cfg?.username || getHandler() || "";
+    }
+    if (apiEnvSelect) apiEnvSelect.value = cfg?.env === "test" ? "test" : "prod";
+    let rgIds = parseRgIdsFromConfig(cfg);
+    if (!rgIds.length && Array.isArray(TARGET_RG_IDS)) {
+      rgIds = TARGET_RG_IDS.map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0);
+    }
+    renderApiRgIdRows(rgIds);
+    if (apiSettingsPath) {
+      const p = cfg?.path || "";
+      const err = cfg?.configError ? `（读取异常：${cfg.configError}）` : "";
+      apiSettingsPath.textContent = p ? `配置文件：${p}${err}` : "";
+    }
+    if (cfg?.configError) {
+      setApiSettingsError(`当前配置文件无效，请重新填写并保存。${cfg.configError}`);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    setApiSettingsError(`读取配置失败：${msg}`);
+  }
+  queueMicrotask(() => apiAuthInput?.focus());
+}
+
+async function saveApiSettingsFromForm() {
+  setApiSettingsError("");
+  const authorization = String(apiAuthInput?.value || "").trim();
+  const username = String(apiUsernameInput?.value || "").trim();
+  const env = apiEnvSelect?.value === "test" ? "test" : "prod";
+  const rgIdList = collectApiRgIdsFromForm();
+  const rgIds = rgIdList.join(", ");
+  if (!authorization) {
+    setApiSettingsError("请填写 authorization 令牌");
+    return;
+  }
+  if (!username) {
+    setApiSettingsError("请填写 username（MIS）");
+    return;
+  }
+  try {
+    const res = await window.ttDesktopApi?.saveTtApiConfig?.({
+      authorization,
+      username,
+      env,
+      rgIds
+    });
+    if (!res?.ok) {
+      setApiSettingsError(res?.message || "保存失败");
+      return;
+    }
+    // 同步界面处理人，避免 API username 与处理人不一致
+    if (handlerInput && username) {
+      handlerInput.value = username;
+      localStorage.setItem(STORAGE_KEYS.handler, username);
+    }
+    closeApiSettingsModal();
+    log(res.message || "API 配置已保存。", "success");
+    if (res.path) log(`配置已写入：${res.path}`, "muted");
+    await setupApiTicketPolling();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    setApiSettingsError(`保存失败：${msg}`);
   }
 }
 
@@ -1845,6 +2078,7 @@ function bindModuleDeps() {
     waitForTicketInDom: TD.tickets.waitForTicketInDom,
     isTicketVisibleInDom: TD.tickets.isTicketVisibleInDom,
     requestTtWebviewReload,
+    isTtWebviewReloadInFlight,
     scanHandleListForTitleWatch,
     mapDomWatchItemToTicket,
     isTtDomSyncPending,

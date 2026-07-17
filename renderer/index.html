@@ -50,6 +50,9 @@
             </span>
             <span class="start-switch-label" id="startSwitchLabel">关</span>
           </label>
+          <button id="apiSettingsBtn" class="api-settings-btn" type="button" title="填写 API 令牌、MIS 与工单组（无需记事本改 JSON）">
+            API 设置
+          </button>
         </div>
       </header>
 
@@ -242,6 +245,49 @@
           <webview id="ttWebview" class="web-frame" allowpopups></webview>
         </section>
       </main>
+    </div>
+
+    <div id="apiSettingsModal" class="api-settings-modal" hidden>
+      <div class="api-settings-backdrop" data-api-settings-close="1"></div>
+      <div class="api-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="apiSettingsTitle">
+        <div class="api-settings-header">
+          <h2 id="apiSettingsTitle">API 设置</h2>
+          <button id="apiSettingsCloseBtn" class="api-settings-close" type="button" aria-label="关闭">×</button>
+        </div>
+        <p class="api-settings-hint">在此填写即可，无需用记事本改 JSON。保存后下次拉单立即生效。</p>
+        <label class="api-settings-field">
+          <span class="api-settings-label">令牌 authorization</span>
+          <input id="apiAuthInput" class="api-settings-input" type="password" autocomplete="off" placeholder="Basic xxxxx" />
+        </label>
+        <label class="api-settings-field">
+          <span class="api-settings-label">用户名 username（MIS）</span>
+          <input id="apiUsernameInput" class="api-settings-input" type="text" autocomplete="off" placeholder="例如 wb_lidelei" />
+        </label>
+        <label class="api-settings-field">
+          <span class="api-settings-label">环境 env</span>
+          <select id="apiEnvSelect" class="api-settings-input">
+            <option value="prod">prod（生产）</option>
+            <option value="test">test（测试）</option>
+          </select>
+        </label>
+        <div class="api-settings-field">
+          <span class="api-settings-label">工单组 rgIds</span>
+          <p class="api-settings-field-hint">每行一个工单组 ID，点击「添加」增加一行。</p>
+          <div id="apiRgIdsList" class="api-rgids-list" role="list"></div>
+          <button id="apiRgIdsAddBtn" class="api-rgids-add-btn" type="button">+ 添加工单组</button>
+        </div>
+        <p id="apiSettingsPath" class="api-settings-path" aria-live="polite"></p>
+        <p id="apiSettingsError" class="api-settings-error" hidden aria-live="polite"></p>
+        <div class="api-settings-actions">
+          <button id="apiSettingsOpenFileBtn" class="api-settings-btn-secondary" type="button" title="高级：用外部编辑器打开配置文件">
+            打开配置文件
+          </button>
+          <div class="api-settings-actions-right">
+            <button id="apiSettingsCancelBtn" class="api-settings-btn-secondary" type="button">取消</button>
+            <button id="apiSettingsSaveBtn" class="api-settings-btn-primary" type="button">保存</button>
+          </div>
+        </div>
+      </div>
     </div>
 
     <script src="./core/constants.js"></script>

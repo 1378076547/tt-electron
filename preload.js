@@ -8,9 +8,22 @@ contextBridge.exposeInMainWorld("ttDesktopApi", {
   queryTicketsByApi: (payload) => ipcRenderer.invoke("tt-api-query-tickets", payload),
   queryTicketDetailByApi: (payload) => ipcRenderer.invoke("tt-api-ticket-detail", payload),
   getTtApiConfigStatus: () => ipcRenderer.invoke("get-tt-api-config-status"),
+  getTtApiConfig: () => ipcRenderer.invoke("get-tt-api-config"),
+  saveTtApiConfig: (payload) => ipcRenderer.invoke("save-tt-api-config", payload),
   getHfIssueConfig: () => ipcRenderer.invoke("get-hf-issue-config"),
   getBurstOutbreakConfig: () => ipcRenderer.invoke("get-burst-outbreak-config"),
   openTtApiConfig: () => ipcRenderer.invoke("open-tt-api-config"),
+  onOpenApiSettings: (callback) => {
+    const listener = () => {
+      try {
+        callback();
+      } catch {
+        // ignore
+      }
+    };
+    ipcRenderer.on("open-api-settings", listener);
+    return () => ipcRenderer.removeListener("open-api-settings", listener);
+  },
   loadChinaCities: () => ipcRenderer.invoke("load-china-cities"),
   getAppVersion: () => ipcRenderer.invoke("get-app-version"),
   selectAndReadPmCsv: () => ipcRenderer.invoke("select-and-read-pm-csv"),

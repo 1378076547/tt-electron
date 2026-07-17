@@ -46,6 +46,7 @@
     waitForTicketInDom: async () => ({ found: false }),
     isTicketVisibleInDom: async () => ({ found: false }),
     requestTtWebviewReload: () => false,
+    isTtWebviewReloadInFlight: () => false,
     scanHandleListForTitleWatch: async () => ({ hasListWrapper: false, items: [] }),
     mapDomWatchItemToTicket: (row) => row,
     isTtDomSyncPending: () => false,
@@ -699,20 +700,52 @@ async function inspectTicketItemForTitle(item) {
   return { ok: true, opened: true, inspect, res };
 }
 
+/** 等待 TT webview 再次就绪（F5 后） */
+async function waitForWebviewReadyForTitle(maxWaitMs = 20000) {
+  const end = Date.now() + maxWaitMs;
+  while (Date.now() < end) {
+    if (deps.getWebviewReady() && deps.getTtWebview() && !deps.isTtWebviewReloadInFlight?.()) {
+      return true;
+    }
+    await sleep(200);
+  }
+  return !!(deps.getWebviewReady() && deps.getTtWebview());
+}
+
+/** 列表没有目标单时强制刷 TT，打破「改标题等列表 / F5 被改标题挡住」死锁 */
+function forceTtSyncForMissingTitleTicket() {
+  return !!deps.requestTtWebviewReload?.("api_new_ticket");
+}
+
 /**
- * 工单是否已在 TT 列表中；已在列表则可直接点击，无需长时间等待同步。
+ * 工单是否已在 TT 列表中；未出现时先短等，再 F5，再等列表，避免空转 10s 且挡住刷新。
  * @returns {Promise<{ ready: boolean, reason?: string }>}
  */
 async function ensureTicketDomReadyForTitle(item, tag, opts = {}) {
   if (!deps.getWebviewReady() || !deps.getTtWebview()) {
+    forceTtSyncForMissingTitleTicket();
     return { ready: false, reason: "webview_not_ready" };
   }
 
   const label = (item?.title || item?.id || "工单").slice(0, 50);
-  const waitMs = opts.alreadyInList ? 5000 : 10000;
-  const rowHit = await waitForHandleListRowForTitle(item, waitMs);
+  const firstWaitMs = opts.alreadyInList ? 4000 : 2500;
+  let rowHit = await waitForHandleListRowForTitle(item, firstWaitMs);
+
+  if (!rowHit.found) {
+    log(`工单「${label}」暂未出现在列表，正在刷新页面…`, "info");
+    forceTtSyncForMissingTitleTicket();
+    const ready = await waitForWebviewReadyForTitle(20000);
+    if (!ready) {
+      log(`工单「${label}」页面刷新超时，将自动重试。`, "warning");
+      return { ready: false, reason: "webview_not_ready" };
+    }
+    await sleep(800);
+    rowHit = await waitForHandleListRowForTitle(item, 10000);
+  }
+
   if (!rowHit.found) {
     log(`工单「${label}」未在列表中找到，将自动重试。`, "warning");
+    forceTtSyncForMissingTitleTicket();
     return { ready: false, reason: "not_in_list" };
   }
 
@@ -899,6 +932,7 @@ async function runNewTicketTitleNormalize(opts = {}) {
 
     if (deferredDomCount > 0) {
       titleOnNewQueued = true;
+      forceTtSyncForMissingTitleTicket();
     }
 
     if (!appliedCount && !processed.length) {
@@ -958,6 +992,13 @@ async function ensureNewTicketTitlesBeforeAccept(opts = {}) {
   if (!deps.getRunning() || !deps.getTitleOnNewAutoEnabled()) return true;
   if (titleNormalizeInProgress) return false;
 
+  // API 已见单但 TT 尚未同步时，先刷页面，勿直接占住改标题挡住 F5
+  if (deps.isTtDomSyncPending()) {
+    titleOnNewQueued = true;
+    forceTtSyncForMissingTitleTicket();
+    return false;
+  }
+
   ensureTitleBaselineIfNeeded();
   let newOnes = detectNewTicketsForTitle(getTickets());
   const tryRefresh = opts.tryRefresh !== false;
@@ -969,6 +1010,7 @@ async function ensureNewTicketTitlesBeforeAccept(opts = {}) {
   const res = await runNewTicketTitleNormalize({ triggeredBy: "来单改标题-接单前" });
   if (res.deferred > 0 || (res.pendingNew > 0 && res.applied === 0)) {
     titleOnNewQueued = true;
+    forceTtSyncForMissingTitleTicket();
     return false;
   }
   return true;
@@ -979,6 +1021,11 @@ function requestTitleOnNewAfterRefresh() {
   if (!deps.getTitleOnNewAutoEnabled()) return;
   if (titleNormalizeInProgress) {
     titleOnNewQueued = true;
+    return;
+  }
+  if (deps.isTtDomSyncPending()) {
+    titleOnNewQueued = true;
+    forceTtSyncForMissingTitleTicket();
     return;
   }
   if (deps.getRunning() && (deps.getBusy() || deps.getPendingRunAfterReload())) {
@@ -1055,9 +1102,28 @@ async function flushTitleOnNewQueueIfPossible() {
   if (titleNormalizeInProgress || deps.getBusy() || deps.getPendingRunAfterReload() || deps.getPriorityBatchInProgress() || deps.getPmPullInProgress()) {
     return;
   }
-  titleOnNewQueued = false;
+  if (deps.isTtDomSyncPending() || deps.isTtWebviewReloadInFlight?.()) {
+    forceTtSyncForMissingTitleTicket();
+    return;
+  }
+
   const newOnes = detectNewTicketsForTitle(getTickets());
-  if (!newOnes.length) return;
+  if (!newOnes.length) {
+    titleOnNewQueued = false;
+    return;
+  }
+
+  // 列表仍缺单时先 F5，等页面就绪后再改标题，避免空转重试
+  for (const item of newOnes) {
+    const hit = await deps.isTicketItemInHandleList?.(item);
+    if (!hit?.found) {
+      titleOnNewQueued = true;
+      forceTtSyncForMissingTitleTicket();
+      return;
+    }
+  }
+
+  titleOnNewQueued = false;
   await runNewTicketTitleNormalize({ triggeredBy: "来单改标题-自动" });
 }
 
