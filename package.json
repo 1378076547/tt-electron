@@ -1,6 +1,6 @@
 {
   "name": "ttdesktop-electron",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "description": "TTDesktop1.0 - Electron high-fidelity desktop client for TT 自动接单",
   "main": "main.js",
   "scripts": {
@@ -30,10 +30,8 @@
       "package.json"
     ],
     "publish": {
-      "provider": "github",
-      "owner": "1378076547",
-      "repo": "tt-electron",
-      "private": true
+      "provider": "generic",
+      "url": "https://s3plus.sankuai.com/static-bucket/4000%20Agent%20Tools/"
     },
     "win": {
       "target": "nsis",

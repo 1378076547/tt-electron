@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, ipcMain, shell, session, dialog, Notification } = require("electron");
+const { app, BrowserWindow, Tray, Menu, ipcMain, shell, session, dialog, Notification, nativeTheme } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const https = require("https");
@@ -108,12 +108,16 @@ function createAppMenu() {
 function createWindow() {
   const ver = app.getVersion();
   const titleBase = `TTDesktop1.0 v${ver}`;
+  // 尽量让系统菜单/控件跟深色外壳一致（Windows 原生菜单仍受系统主题限制）
+  try {
+    nativeTheme.themeSource = "dark";
+  } catch (_) {}
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
     minWidth: 980,
     minHeight: 680,
-    backgroundColor: "#050816",
+    backgroundColor: "#0b1220",
     title: titleBase,
     icon: path.join(__dirname, "assets", "cat.png"),
     webPreferences: {
@@ -434,12 +438,12 @@ function getApiConfigHint() {
   if (creds.authorization) return "";
   const p = creds.configPath;
   if (creds.configError) {
-    return `API 配置文件无效（${p}）：${creds.configError}。请点击「API 设置」重新填写。`;
+    return `API 配置文件无效（${p}）：${creds.configError}。请到菜单「文件 → API 设置…」重新填写。`;
   }
   if (!creds.configLoaded) {
-    return `API 未配置：请点击「API 设置」填写令牌与 MIS（配置文件：${p}）`;
+    return `API 未配置：请到菜单「文件 → API 设置…」填写令牌与 MIS（配置文件：${p}）`;
   }
-  return `API 未配置：请点击「API 设置」填写 authorization`;
+  return `API 未配置：请到菜单「文件 → API 设置…」填写 authorization`;
 }
 
 function ensureApiConfigFile() {
@@ -868,7 +872,8 @@ ipcMain.handle("tt-api-ticket-detail", async (_event, payload) => {
   }
 });
 
-// ─── 自动更新 ────────────────────────────────────────────────────────────────
+// ─── 自动更新（S3Plus generic，与 package.json build.publish 一致）────────────────
+const UPDATE_FEED_URL = "https://s3plus.sankuai.com/static-bucket/4000%20Agent%20Tools/";
 let updateCheckManual = false;
 
 function logUpdateEvent(message, err) {
@@ -887,6 +892,9 @@ function logUpdateEvent(message, err) {
 autoUpdater.autoDownload = false;
 // 退出时自动安装已下载的更新
 autoUpdater.autoInstallOnAppQuit = true;
+try {
+  autoUpdater.setFeedURL({ provider: "generic", url: UPDATE_FEED_URL });
+} catch (_) {}
 
 // 发现新版本 → 弹窗询问用户
 autoUpdater.on("update-available", (info) => {
@@ -974,7 +982,7 @@ function checkForUpdates(manual = false) {
   }
   updateCheckManual = manual;
   const run = () => {
-    logUpdateEvent(manual ? "手动检查更新" : "启动后自动检查更新");
+    logUpdateEvent(manual ? `手动检查更新（${UPDATE_FEED_URL}）` : `启动后自动检查更新（${UPDATE_FEED_URL}）`);
     autoUpdater.checkForUpdates().catch((err) => {
       logUpdateEvent("checkForUpdates 调用失败", err);
       if (manual && mainWindow) {
