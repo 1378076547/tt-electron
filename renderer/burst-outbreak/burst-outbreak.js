@@ -18,6 +18,9 @@
   let scanInFlight = false;
   /** @type {object|null} */
   let chinaJsonCache = null;
+  /** 短时批量扫描最短间隔，避免每次工单刷新都打 API */
+  const BURST_SCAN_MIN_INTERVAL_MS = 5 * 60 * 1000;
+  let lastBurstScanAt = 0;
 
   let deps = {
     isApiConfigured: async () => false
@@ -437,12 +440,22 @@
 
   function requestBurstOutbreakAfterRefresh() {
     if (!isFeatureEnabledInUi()) return;
+    const now = Date.now();
+    if (now - lastBurstScanAt < BURST_SCAN_MIN_INTERVAL_MS) return;
+    if (scanInFlight) return;
+    lastBurstScanAt = now;
     void runBurstOutbreakScan();
+  }
+
+  function clearMemoryCaches() {
+    chinaJsonCache = null;
+    lastBurstScanAt = 0;
   }
 
   TD.burstOutbreak = {
     bind,
     requestBurstOutbreakAfterRefresh,
-    runBurstOutbreakScan
+    runBurstOutbreakScan,
+    clearMemoryCaches
   };
 })(window.TTDesktop);

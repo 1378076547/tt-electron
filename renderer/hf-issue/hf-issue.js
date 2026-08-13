@@ -1,5 +1,6 @@
 /**
  * 高频问题识别：依赖「开始」→ 扫描 API 配置 MIS 的当前/来单 → 历史统计用 RG 全组
+ * 刷新时立刻复读活跃告警；历史统计做了加速（站点关键词、30 天推导 7 天、命中后提前结束）
  */
 (function initHfIssue(TD) {
   const D = TD.dom;
@@ -7,7 +8,10 @@
   const C = TD.constants;
 
   const MS_DAY = 86400000;
-  const MAX_API_PAGES = 15;
+  /** 历史统计翻页上限（站点关键词命中后可提前结束） */
+  const MAX_API_PAGES = 12;
+  /** 单次统计最多收集的匹配单数（够判定阈值即可，避免无谓翻页） */
+  const MATCH_COLLECT_CAP = 20;
   const NOTIFY_COOLDOWN_MS = 30 * 60 * 1000;
 
   /** @type {Set<string>} */
@@ -19,6 +23,14 @@
   let scanInFlight = false;
   /** @type {object|null} */
   let chinaJsonCache = null;
+  /** @type {object|null} */
+  let lastLoadedCfg = null;
+  /** 重统计最短间隔：避免每次工单刷新都打满 API */
+  const HF_SCAN_MIN_INTERVAL_MS = 5 * 60 * 1000;
+  /** 轻量新单检查最短间隔 */
+  const HF_LIGHT_CHECK_MIN_MS = 60 * 1000;
+  let lastHfHeavyScanAt = 0;
+  let lastHfLightCheckAt = 0;
 
   let deps = {
     getHandler: () => "",
@@ -260,22 +272,29 @@
 
     const engine = window.TTTitlePrefix;
     const faultTerms = collectAllFaultTerms(categories);
-    const detail = item.id ? await fetchTicketDetail(item.id, apiMis) : null;
-    const inspect = detail
-      ? buildInspectFromApiTicket(detail)
-      : { architectureRaw: "", warehouseStore: "", currentTitle: title };
 
-    if (!inspect.currentTitle) inspect.currentTitle = title;
-
+    // 英文标题：优先从标题抠站点，避免先打详情接口拖慢首报
     if (engine?.isEnglishDominantTitle?.(title)) {
+      const fromTitle = extractEnglishSiteKeyFromTitle(title, faultTerms);
+      if (fromTitle) return { siteKey: fromTitle, source: "title_en_fast" };
+
+      const detail = item.id ? await fetchTicketDetail(item.id, apiMis) : null;
+      const inspect = detail
+        ? buildInspectFromApiTicket(detail)
+        : { architectureRaw: "", warehouseStore: "", currentTitle: title };
+      if (!inspect.currentTitle) inspect.currentTitle = title;
       if (engine?.computeExpectedTitle) {
         const en = engine.computeExpectedTitle(inspect, null);
         if (en?.prefix) return { siteKey: String(en.prefix).trim(), source: "engine_en" };
       }
-      const fromTitle = extractEnglishSiteKeyFromTitle(title, faultTerms);
-      if (fromTitle) return { siteKey: fromTitle, source: "title_en" };
       return { siteKey: "", reason: "en_site_unresolved" };
     }
+
+    const detail = item.id ? await fetchTicketDetail(item.id, apiMis) : null;
+    const inspect = detail
+      ? buildInspectFromApiTicket(detail)
+      : { architectureRaw: "", warehouseStore: "", currentTitle: title };
+    if (!inspect.currentTitle) inspect.currentTitle = title;
 
     try {
       const china = await ensureChinaCitiesLoaded();
@@ -337,10 +356,21 @@
     return (category.terms || []).some((term) => t.includes(normalizeKey(term)));
   }
 
-  async function fetchTicketsInWindow({ rgIds, startMs, endMs, keyWord, apiMis, scopeAssignee = false }) {
+  async function fetchTicketsInWindow({
+    rgIds,
+    startMs,
+    endMs,
+    keyWord,
+    apiMis,
+    scopeAssignee = false,
+    matchRow = null,
+    stopWhenMatched = 0,
+    maxPages = MAX_API_PAGES
+  }) {
     const merged = new Map();
     const mis = scopeAssignee ? String(apiMis || "").trim() : "";
-    for (let cn = 1; cn <= MAX_API_PAGES; cn += 1) {
+    let matchedCount = 0;
+    for (let cn = 1; cn <= maxPages; cn += 1) {
       const startIso = new Date(startMs).toISOString();
       const endIso = new Date(endMs).toISOString();
       const params = {
@@ -379,7 +409,17 @@
       if (!items.length) break;
       for (const x of items) {
         const row = mapApiItem(x);
-        if (row.id && !merged.has(row.id)) merged.set(row.id, row);
+        if (!row.id || merged.has(row.id)) continue;
+        if (typeof matchRow === "function") {
+          if (!matchRow(row)) continue;
+          merged.set(row.id, row);
+          matchedCount += 1;
+          if (stopWhenMatched > 0 && matchedCount >= stopWhenMatched) {
+            return Array.from(merged.values());
+          }
+        } else {
+          merged.set(row.id, row);
+        }
       }
       if (items.length < 100) break;
     }
@@ -427,27 +467,58 @@
     const out = [];
     const sk = String(siteKey || "").trim();
     if (sk) out.push(sk);
-    const t = normalizeKey(title);
-    for (const term of category?.terms || []) {
-      if (term && t.includes(normalizeKey(term))) out.push(String(term));
+    // 有明确站点关键词时不再附加故障词（如 Network），避免拉回大量无关单拖慢统计
+    if (!sk) {
+      const t = normalizeKey(title);
+      for (const term of category?.terms || []) {
+        if (term && t.includes(normalizeKey(term))) out.push(String(term));
+      }
+      if (!out.length && category?.terms?.[0]) out.push(category.terms[0]);
     }
-    if (!out.length && category?.terms?.[0]) out.push(category.terms[0]);
     return Array.from(new Set(out.filter(Boolean)));
   }
 
-  async function fetchTicketsMergedKeyWords({ rgIds, startMs, endMs, keyWords, apiMis }) {
+  function ticketCreatedMs(row) {
+    const raw = row?.createdAtEpoch;
+    if (typeof raw === "number" && Number.isFinite(raw)) {
+      return raw < 1e12 ? raw * 1000 : raw;
+    }
+    return 0;
+  }
+
+  /** 处理中 / 暂停中 / 未处理 均视为仍未关闭 */
+  function isStillOpenStatus(statusText) {
+    return !isClosedStatus(statusText);
+  }
+
+  async function fetchTicketsMergedKeyWords({
+    rgIds,
+    startMs,
+    endMs,
+    keyWords,
+    apiMis,
+    matchRow = null,
+    stopWhenMatched = 0
+  }) {
     const merged = new Map();
     const kws = Array.from(new Set((keyWords || []).map((k) => String(k || "").trim()).filter(Boolean)));
     const queries = kws.length ? kws : [""];
-    for (const kw of queries) {
-      const rows = await fetchTicketsInWindow({
-        rgIds,
-        startMs,
-        endMs,
-        keyWord: kw,
-        apiMis,
-        scopeAssignee: false
-      });
+    // 多关键词并行，缩短等待
+    const batches = await Promise.all(
+      queries.map((kw) =>
+        fetchTicketsInWindow({
+          rgIds,
+          startMs,
+          endMs,
+          keyWord: kw,
+          apiMis,
+          scopeAssignee: false,
+          matchRow,
+          stopWhenMatched
+        })
+      )
+    );
+    for (const rows of batches) {
       for (const row of rows) {
         if (row.id) merged.set(row.id, row);
       }
@@ -455,12 +526,23 @@
     return Array.from(merged.values());
   }
 
-  async function countMatchingTickets({ rgIds, siteKey, category, days, keyWords, apiMis }) {
+  async function countMatchingTickets({ rgIds, siteKey, category, days, keyWords, apiMis, collectCap = MATCH_COLLECT_CAP }) {
     const endMs = Date.now();
     const startMs = endMs - days * MS_DAY;
-    const raw = await fetchTicketsMergedKeyWords({ rgIds, startMs, endMs, keyWords, apiMis });
-    const allMatched = raw.filter((row) => titleMatchesSiteAndCategory(row.title, siteKey, category));
-    const openMatched = allMatched.filter((row) => !isClosedStatus(row.statusText));
+    const primary = String(siteKey || "").trim();
+    const effectiveKws = primary ? [primary] : keyWords;
+    const matchRow = (row) => titleMatchesSiteAndCategory(row.title, siteKey, category);
+    const raw = await fetchTicketsMergedKeyWords({
+      rgIds,
+      startMs,
+      endMs,
+      keyWords: effectiveKws,
+      apiMis,
+      matchRow,
+      stopWhenMatched: Math.max(1, collectCap)
+    });
+    const allMatched = raw;
+    const openMatched = allMatched.filter((row) => isStillOpenStatus(row.statusText));
     return { allMatched, openMatched, rawCount: raw.length };
   }
 
@@ -476,8 +558,8 @@
   }
 
   function logActiveAlert(alert, cfg, { isNew = false } = {}) {
-    const th7 = cfg.thresholds.days7;
-    const th30 = cfg.thresholds.days30;
+    const th7 = cfg?.thresholds?.days7 ?? alert.threshold7 ?? 3;
+    const th30 = cfg?.thresholds?.days30 ?? alert.threshold30 ?? 5;
     const level = alert.count7 >= th7 || alert.count30 >= th30 ? "error" : "warning";
     const head = isNew ? "⚠ 高频问题预警（单站反复）" : "⚠ 高频问题（单站反复）";
     log(
@@ -488,6 +570,18 @@
         `  相关工单：${formatIdList(alert.openTicketIds)}`,
       level
     );
+  }
+
+  /** 刷新时立刻复读：相关单仍在处理中/暂停中/未处理则继续提示 */
+  function relogActiveAlerts() {
+    if (!activeAlerts.size) return;
+    const cfg = lastLoadedCfg || {
+      thresholds: { days7: 3, days30: 5 }
+    };
+    for (const alert of activeAlerts.values()) {
+      if (!(alert.openTicketIds || []).length) continue;
+      logActiveAlert(alert, cfg, { isNew: false });
+    }
   }
 
   function updateHfIssueUi() {
@@ -532,20 +626,29 @@
   }
 
   async function evaluateSiteCategory({ siteKey, category, cfg, rgIds, keyWords, apiMis, isNewTrigger }) {
-    const [r7, r30] = await Promise.all([
-      countMatchingTickets({ rgIds, siteKey, category, days: 7, keyWords, apiMis }),
-      countMatchingTickets({ rgIds, siteKey, category, days: 30, keyWords, apiMis })
-    ]);
-    const open7 = r7.openMatched.map((t) => t.id).filter(Boolean);
-    const open30 = r30.openMatched.map((t) => t.id).filter(Boolean);
-    const openSet = new Set([...open7, ...open30]);
-    const openTicketIds = Array.from(openSet);
-    const count7 = r7.allMatched.length;
-    const count30 = r30.allMatched.length;
-    const openCount7 = r7.openMatched.length;
-    const openCount30 = r30.openMatched.length;
     const th7 = cfg.thresholds.days7;
     const th30 = cfg.thresholds.days30;
+    // 只拉 30 天，7 天从结果推导，历史查询次数减半
+    const r30 = await countMatchingTickets({
+      rgIds,
+      siteKey,
+      category,
+      days: 30,
+      keyWords,
+      apiMis,
+      collectCap: Math.max(8, th30, th7)
+    });
+    const start7 = Date.now() - 7 * MS_DAY;
+    const all7 = r30.allMatched.filter((t) => ticketCreatedMs(t) >= start7);
+    const open7 = all7.filter((t) => isStillOpenStatus(t.statusText));
+    const open30 = r30.openMatched;
+    const openTicketIds = Array.from(
+      new Set([...open7, ...open30].map((t) => t.id).filter(Boolean))
+    );
+    const count7 = all7.length;
+    const count30 = r30.allMatched.length;
+    const openCount7 = open7.length;
+    const openCount30 = open30.length;
     const hit = count7 >= th7 || count30 >= th30;
     const mapKey = alertMapKey(siteKey, category.id);
 
@@ -554,8 +657,6 @@
         activeAlerts.delete(mapKey);
         log(`高频问题已恢复：${siteKey} · ${category.label}。`, "success");
         updateHfIssueUi();
-      } else if (isNewTrigger) {
-        // below threshold — no user-facing log
       }
       return null;
     }
@@ -585,8 +686,13 @@
       updatedAt: Date.now()
     };
     activeAlerts.set(mapKey, alert);
-    logActiveAlert(alert, cfg, { isNew: isNewTrigger || !prev });
-    if (isNewTrigger || !prev || count7 > (prev.count7 || 0) || count30 > (prev.count30 || 0)) {
+    const grew =
+      !prev || count7 > (prev.count7 || 0) || count30 > (prev.count30 || 0);
+    // 周期性复读交给刷新时的 relogActiveAlerts；此处仅新触发/加重时写日志，避免重复刷屏
+    if (isNewTrigger || !prev || grew) {
+      logActiveAlert(alert, cfg, { isNew: isNewTrigger || !prev });
+    }
+    if (isNewTrigger || !prev || grew) {
       maybeNotifyWindows(alert, cfg);
     }
     updateHfIssueUi();
@@ -642,6 +748,14 @@
     updateHfIssueUi();
   }
 
+  function clearMemoryCaches() {
+    chinaJsonCache = null;
+    knownTicketKeys.clear();
+    activeAlerts.clear();
+    notifyCooldown.clear();
+    updateHfIssueUi();
+  }
+
   async function runInitialScanOnStart() {
     if (scanInFlight) return;
     if (!deps.getRunning() || !isFeatureEnabledInUi()) return;
@@ -650,6 +764,7 @@
     scanInFlight = true;
     try {
       const cfg = await loadConfig();
+      lastLoadedCfg = cfg;
       if (!cfg.enabled) return;
 
       const apiMis = await getApiUsername();
@@ -666,6 +781,7 @@
 
       const current = await fetchCurrentOpenTicketsForApiUser(rgIds, apiMis);
       log("正在检查高频问题…", "info");
+      lastHfHeavyScanAt = Date.now();
 
       for (const item of current) {
         await processTicketScan(item, cfg, rgIds, apiMis, { isNewTrigger: true });
@@ -704,14 +820,18 @@
     }
   }
 
-  async function runHfIssueScan() {
+  async function runHfIssueScan({ forceHeavy = false } = {}) {
     if (scanInFlight) return;
     if (!deps.getRunning() || !isFeatureEnabledInUi()) return;
     if (!(await deps.isApiConfigured?.())) return;
 
+    const now = Date.now();
+    const allowHeavy = forceHeavy || now - lastHfHeavyScanAt >= HF_SCAN_MIN_INTERVAL_MS;
+
     scanInFlight = true;
     try {
       const cfg = await loadConfig();
+      lastLoadedCfg = cfg;
       if (!cfg.enabled) return;
 
       const apiMis = await getApiUsername();
@@ -723,13 +843,18 @@
         return;
       }
 
-      await refreshActiveAlerts(cfg, rgIds, apiMis);
+      if (allowHeavy) {
+        lastHfHeavyScanAt = now;
+        await refreshActiveAlerts(cfg, rgIds, apiMis);
+      }
 
       const apiOpen = await fetchCurrentOpenTicketsForApiUser(rgIds, apiMis);
       const newOnes = apiOpen.filter((t) => {
         const k = ticketKey(t);
         return k && !knownTicketKeys.has(k);
       });
+      // 新单仍及时评估；无新单且未到重统计窗口则跳过
+      if (!newOnes.length && !allowHeavy) return;
       for (const item of newOnes) {
         await processTicketScan(item, cfg, rgIds, apiMis, { isNewTrigger: true });
       }
@@ -743,7 +868,14 @@
 
   function requestHfIssueAfterRefresh() {
     if (!deps.getRunning() || !isFeatureEnabledInUi()) return;
-    void runHfIssueScan();
+    // 跟刷新立刻复读活跃告警；扫描有独立节流
+    relogActiveAlerts();
+    const now = Date.now();
+    const dueHeavy = now - lastHfHeavyScanAt >= HF_SCAN_MIN_INTERVAL_MS;
+    const dueLight = now - lastHfLightCheckAt >= HF_LIGHT_CHECK_MIN_MS;
+    if (!dueHeavy && !dueLight) return;
+    lastHfLightCheckAt = now;
+    void runHfIssueScan({ forceHeavy: dueHeavy });
   }
 
   function onStart() {
@@ -755,6 +887,7 @@
     bind,
     onStart,
     clearOnStop,
+    clearMemoryCaches,
     requestHfIssueAfterRefresh,
     runHfIssueScan
   };

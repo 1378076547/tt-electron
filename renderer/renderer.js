@@ -17,7 +17,10 @@ const {
   TARGET_RG_IDS,
   TARGET_FILTER_IDS,
   TT_WEBVIEW_PARTITION,
-  TT_WEBVIEW_DEFAULT_SRC
+  TT_WEBVIEW_DEFAULT_SRC,
+  TT_ZOOM_MIN,
+  TT_ZOOM_MAX,
+  TT_ZOOM_STEP
 } = C;
 
 const {
@@ -32,6 +35,7 @@ const {
   startBtn,
   logList,
   ttWebview,
+  ttZoomLabel,
   webviewLoadingHint,
   templatesSaveBtn,
   templatesAddRuleBtn,
@@ -42,7 +46,6 @@ const {
   tabLogsBtn,
   tabTicketsBtn,
   tabTemplatesBtn,
-  openLogsDirBtn,
   panelLogs,
   panelTickets,
   panelTemplates,
@@ -79,7 +82,6 @@ const {
   hfIssueSummaryEl,
   burstOutbreakHeaderBadgeEl,
   burstOutbreakSummaryEl,
-  apiSettingsBtn,
   apiSettingsModal,
   apiSettingsCloseBtn,
   apiSettingsCancelBtn,
@@ -197,7 +199,7 @@ const {
   applyPriorityForActiveTicket,
   applyPriorityBatch
 } = TD.priority;
-const { isPullInProgress, updatePmCsvPathLabel, selectPmCsvFile, runPmPullByRegion } = TD.pm;
+const { isPullInProgress, updatePmCsvPathLabel, selectPmCsvFile, syncPmCsvFromS3, ensurePmCsvReady, runPmPullByRegion } = TD.pm;
 const {
   onStart: onHfIssueStart,
   clearOnStop: clearHfIssueOnStop,
@@ -221,6 +223,65 @@ const { requestBurstOutbreakAfterRefresh } = TD.burstOutbreak;
 let running = false;
 let busy = false;
 let webviewReady = false;
+/** 自动化 / 接单 / 改标题等：永远只用主标签 webview */
+function getAutomationWebview() {
+  return TD.browser?.getPrimaryWebview?.() || ttWebview || null;
+}
+
+/** 用户当前看到的标签（缩放等） */
+function getVisibleWebview() {
+  return TD.browser?.getActiveWebview?.() || getAutomationWebview();
+}
+
+/** 内置 TT 缩放比例（最小 80%） */
+let ttZoomFactor = 1;
+
+function clampTtZoomFactor(value) {
+  const min = Number(TT_ZOOM_MIN) > 0 ? Number(TT_ZOOM_MIN) : 0.8;
+  const max = Number(TT_ZOOM_MAX) > min ? Number(TT_ZOOM_MAX) : 2;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 1;
+  const stepped = Math.round(n * 10) / 10;
+  return Math.min(max, Math.max(min, stepped));
+}
+
+function updateTtZoomLabel() {
+  if (!ttZoomLabel) return;
+  ttZoomLabel.textContent = `${Math.round(ttZoomFactor * 100)}%`;
+}
+
+function applyTtWebviewZoom(factor, options = {}) {
+  const next = clampTtZoomFactor(factor);
+  const changed = Math.abs(next - ttZoomFactor) > 0.001;
+  ttZoomFactor = next;
+  updateTtZoomLabel();
+  const target = options.webview || getVisibleWebview();
+  try {
+    if (target && typeof target.setZoomFactor === "function") {
+      target.setZoomFactor(ttZoomFactor);
+    }
+  } catch (_) {}
+  if (options.persist !== false) {
+    try {
+      localStorage.setItem(STORAGE_KEYS.ttZoomFactor, String(ttZoomFactor));
+    } catch (_) {}
+  }
+  if (changed && options.log) {
+    log(`内置 TT 缩放：${Math.round(ttZoomFactor * 100)}%`, "info");
+  }
+  return ttZoomFactor;
+}
+
+function nudgeTtWebviewZoom(direction) {
+  const step = Number(TT_ZOOM_STEP) > 0 ? Number(TT_ZOOM_STEP) : 0.1;
+  const delta = direction > 0 ? step : -step;
+  const before = ttZoomFactor;
+  const after = applyTtWebviewZoom(ttZoomFactor + delta);
+  if (Math.abs(after - before) < 0.001 && after <= clampTtZoomFactor(TT_ZOOM_MIN) + 0.001 && delta < 0) {
+    log("内置 TT 已缩至最小 80%，避免过小影响操作。", "info");
+  }
+}
+
 let runTimer = null;
 /** @type {ReturnType<typeof setInterval> | null} */
 let titlePatrolTimer = null;
@@ -232,6 +293,8 @@ let pendingRunAfterReload = false;
 let batchInProgress = false;
 let batchHandledCount = 0;
 let batchRemaining = 0;
+let batchAutoRetryCount = 0;
+const TT_BATCH_RETRY_MAX = 3;
 let sessionHandledCount = 0;
 let titleOnNewAutoEnabled = false;
 
@@ -424,6 +487,11 @@ function loadSettings() {
   const savedAutoBoost = localStorage.getItem(STORAGE_KEYS.autoPriorityBoost);
   const savedSlaReminder = localStorage.getItem(STORAGE_KEYS.slaReminderEnabled);
   const savedSlaNotify = localStorage.getItem(STORAGE_KEYS.slaNotifyWindows);
+  const savedZoom = localStorage.getItem(STORAGE_KEYS.ttZoomFactor);
+  if (savedZoom != null && String(savedZoom).trim() !== "") {
+    ttZoomFactor = clampTtZoomFactor(savedZoom);
+  }
+  updateTtZoomLabel();
 
   if (handlerInput) handlerInput.value = savedHandler || DEFAULT_HANDLER;
   if (intervalInput) intervalInput.value = String(clampInterval(savedInterval || DEFAULT_INTERVAL_SEC));
@@ -965,7 +1033,7 @@ function statusToLevel(status) {
 }
 
 async function refreshPendingCount() {
-  if (!webviewReady || !ttWebview) return;
+  if (!webviewReady || !getAutomationWebview()) return;
 
   const maxRetries = 5;
   const retryDelayMs = 250;
@@ -990,8 +1058,19 @@ async function refreshPendingCount() {
 }
 
 async function runCheck() {
-  if (!running || busy || isBatchInProgress() || isPullInProgress() || isNormalizeInProgress() || !webviewReady || !ttWebview) {
+  if (!running || busy || isBatchInProgress() || isPullInProgress() || isNormalizeInProgress() || !webviewReady || !getAutomationWebview()) {
     return null;
+  }
+
+  // 方案 L：发话术/接单前切到接单面，保证输入框可聚焦
+  try {
+    const sw = TD.browser?.ensureOpsSurface?.();
+    if (sw?.switched) {
+      log("已切换到接单 TT 以完成接单/发话术（结束后可回到浏览标签）。", "muted");
+      await sleep(200);
+    }
+  } catch {
+    // ignore
   }
 
   if (titleOnNewAutoEnabled) {
@@ -1001,7 +1080,14 @@ async function runCheck() {
     if (!titlesReady) {
       return { status: "title_pending", pendingCount: NaN };
     }
-    if (!running || busy || isNormalizeInProgress() || !webviewReady || !ttWebview) return null;
+    if (!running || busy || isNormalizeInProgress() || !getAutomationWebview()) return null;
+    const readyWaitEnd = Date.now() + 20000;
+    while ((!webviewReady || isTtWebviewReloadInFlight()) && Date.now() < readyWaitEnd) {
+      await sleep(200);
+    }
+    if (!webviewReady || isTtWebviewReloadInFlight()) {
+      return { status: "title_pending", pendingCount: NaN };
+    }
   }
 
   busy = true;
@@ -1043,7 +1129,7 @@ function isHandledStatus(status) {
 }
 
 function startBatchIfNeeded(reason = "定时触发") {
-  if (!running || !ttWebview) return;
+  if (!running || !getAutomationWebview()) return;
   if (batchInProgress || pendingRunAfterReload || busy || isBatchInProgress() || isPullInProgress() || isNormalizeInProgress()) {
     return;
   }
@@ -1051,12 +1137,13 @@ function startBatchIfNeeded(reason = "定时触发") {
   batchInProgress = true;
   batchHandledCount = 0;
   batchRemaining = DEFAULT_BATCH_LIMIT;
+  batchAutoRetryCount = 0;
   log(`开始自动接单，本轮最多处理 ${DEFAULT_BATCH_LIMIT} 单。`, "info");
   refreshPageThenRunCheck();
 }
 
 function requestAcceptAfterTitle() {
-  if (!running || !ttWebview) return;
+  if (!running || !getAutomationWebview()) return;
   if (isNormalizeInProgress() || busy) {
     pendingRunAfterReload = true;
     return;
@@ -1070,7 +1157,7 @@ function requestAcceptAfterTitle() {
 
 /** API 来新单且已开「开始」：触发一轮批次 F5，无需用户手动刷新 */
 function requestBatchPageRefresh(reason = "api_new_ticket") {
-  if (!running || !ttWebview) return false;
+  if (!running || !getAutomationWebview()) return false;
   if (pendingRunAfterReload) return true;
   // 改标题进行中不能空返回：否则列表永远不刷、改标题一直等列表
   if (isNormalizeInProgress()) {
@@ -1095,6 +1182,14 @@ function requestBatchPageRefresh(reason = "api_new_ticket") {
 function finishBatch() {
   batchInProgress = false;
   batchRemaining = 0;
+  batchAutoRetryCount = 0;
+  try {
+    if (TD.browser?.restoreBrowseSurfaceIfNeeded?.()) {
+      log("接单轮次结束，已回到浏览标签。", "muted");
+    }
+  } catch {
+    // ignore
+  }
   queueMicrotask(() => {
     flushAutoPriorityBoostQueueIfPossible().catch(() => {});
   });
@@ -1113,12 +1208,18 @@ function handleBatchResult(result) {
 
   const status = result?.status || "unknown";
   if (status === "title_pending") {
-    // 标题卡在「等列表」时先强制同步 TT，避免只空等刷新间隔
+    batchAutoRetryCount += 1;
+    if (batchAutoRetryCount > TT_BATCH_RETRY_MAX) {
+      log(`标题等待列表超时（已重试 ${TT_BATCH_RETRY_MAX} 次），本轮接单结束。`, "warning");
+      finishBatch();
+      return;
+    }
+    // 只刷一次，就绪后直接复检，避免 api_new_ticket + batch_next 连环 F5
     requestTtWebviewReload("api_new_ticket");
     setTimeout(() => {
       if (!running || !batchInProgress) return;
-      refreshPageThenRunCheck();
-    }, 2500);
+      void runCheck().then((r) => handleBatchResult(r));
+    }, 2800);
     return;
   }
 
@@ -1136,6 +1237,12 @@ function handleBatchResult(result) {
       status === "unknown" ||
       status === "no_list";
     if (retryable) {
+      batchAutoRetryCount += 1;
+      if (batchAutoRetryCount > TT_BATCH_RETRY_MAX) {
+        log(`接单重试已达上限（${TT_BATCH_RETRY_MAX} 次）：${statusToMessage(status)}。`, "warning");
+        finishBatch();
+        return;
+      }
       setTimeout(() => {
         if (!running || !batchInProgress) return;
         refreshPageThenRunCheck();
@@ -1150,6 +1257,7 @@ function handleBatchResult(result) {
   batchHandledCount += 1;
   sessionHandledCount += 1;
   batchRemaining -= 1;
+  batchAutoRetryCount = 0;
   log(`已处理 ${batchHandledCount} 单，累计 ${sessionHandledCount} 单。`, "success");
   if (batchRemaining <= 0) {
     log(`本轮已达上限 ${DEFAULT_BATCH_LIMIT} 单，暂停接单。`, "warning");
@@ -1164,23 +1272,65 @@ function handleBatchResult(result) {
 }
 
 function refreshPageThenRunCheck() {
-  if (!running || !ttWebview || busy || isNormalizeInProgress()) return;
+  if (!running || !getAutomationWebview() || busy || isNormalizeInProgress()) return;
 
   pendingRunAfterReload = true;
   requestTtWebviewReload("batch_next");
 }
 
-/** 两次自动刷新最短间隔，避免 reload 风暴 */
+/** 两次自动刷新最短间隔（所有原因均生效，避免 F5 风暴） */
 const TT_AUTO_RELOAD_COOLDOWN_MS = 12000;
+/** 接单下一轮允许稍短间隔 */
+const TT_BATCH_RELOAD_COOLDOWN_MS = 1200;
+/** 60 秒内最多自动 F5 次数，超限则熔断 */
+const TT_RELOAD_CIRCUIT_MAX = 3;
+const TT_RELOAD_CIRCUIT_WINDOW_MS = 60000;
+const TT_RELOAD_CIRCUIT_COOLDOWN_MS = 180000;
+/** 刷新卡住超时后强制恢复 */
+const TT_RELOAD_WATCHDOG_MS = 45000;
+
 let lastTtAutoReloadAt = 0;
 let ttSyncReloadQueued = false;
 let ttSyncReloadQueuedReason = "";
+let ttReloadInFlight = false;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let ttReloadWatchdogTimer = null;
+/** @type {number[]} */
+let ttReloadRecentAt = [];
+let ttReloadCircuitOpenUntil = 0;
+
+function clearTtReloadWatchdog() {
+  if (ttReloadWatchdogTimer) {
+    clearTimeout(ttReloadWatchdogTimer);
+    ttReloadWatchdogTimer = null;
+  }
+}
+
+function markTtReloadFinished() {
+  ttReloadInFlight = false;
+  webviewReady = true;
+  clearTtReloadWatchdog();
+  setWebviewLoadingHint(false);
+}
+
+function armTtReloadWatchdog() {
+  clearTtReloadWatchdog();
+  ttReloadWatchdogTimer = setTimeout(() => {
+    ttReloadWatchdogTimer = null;
+    if (!ttReloadInFlight) return;
+    log("页面刷新超时，已自动恢复。", "warning");
+    pendingRunAfterReload = false;
+    markTtReloadFinished();
+    tryFlushTtSyncReloadQueue();
+  }, TT_RELOAD_WATCHDOG_MS);
+}
 
 function executeTtWebviewReload() {
-  if (!ttWebview) return false;
+  const wv = getAutomationWebview();
+  if (!wv) return false;
   try {
-    if (typeof ttWebview.reload === "function") {
-      ttWebview.reload();
+    if (typeof wv.reload === "function") {
+      wv.reload();
       return true;
     }
   } catch {
@@ -1188,14 +1338,14 @@ function executeTtWebviewReload() {
   }
   try {
     const u =
-      (typeof ttWebview.getURL === "function" && ttWebview.getURL()) ||
-      ttWebview.getAttribute?.("src") ||
+      (typeof wv.getURL === "function" && wv.getURL()) ||
+      wv.getAttribute?.("src") ||
       C.TT_WEBVIEW_DEFAULT_SRC;
-    if (typeof ttWebview.loadURL === "function") {
-      void Promise.resolve(ttWebview.loadURL(u)).catch(() => {});
+    if (typeof wv.loadURL === "function") {
+      void Promise.resolve(wv.loadURL(u)).catch(() => {});
       return true;
     }
-    ttWebview.setAttribute("src", u);
+    wv.setAttribute("src", u);
     return true;
   } catch {
     return false;
@@ -1220,49 +1370,73 @@ function ttReloadReasonLabel(reason) {
 }
 
 function isTtWebviewReloadInFlight() {
-  return !webviewReady;
+  return ttReloadInFlight || !webviewReady;
+}
+
+function queueTtSyncReload(reason) {
+  ttSyncReloadQueued = true;
+  ttSyncReloadQueuedReason = reason || "sync";
 }
 
 /**
- * 自动刷新 TT webview（等同 F5），API 来单后同步 DOM，无需用户手动操作。
+ * 自动刷新 TT webview（等同 F5）。
+ * 同一时间只允许一次；全原因冷却；短时过频则熔断。
  * @param {string} [reason]
  * @returns {boolean} 是否已发起 reload
  */
 function requestTtWebviewReload(reason = "sync") {
-  if (!ttWebview) return false;
+  if (!getAutomationWebview()) return false;
 
-  const isNewTicket = reason === "api_new_ticket" || reason === "dom_lag" || reason === "no_list_wrapper";
+  const isSyncReason =
+    reason === "api_new_ticket" || reason === "dom_lag" || reason === "no_list_wrapper";
   const now = Date.now();
 
-  // 来单同步（api_new_ticket/dom_lag/no_list_wrapper）允许在改标题中打断：
-  // 改标题必须等列表出现，若此时禁止 F5 会形成死锁。
-  if (isNormalizeInProgress() && reason !== "batch_next" && !isNewTicket) {
-    ttSyncReloadQueued = true;
-    ttSyncReloadQueuedReason = reason;
+  if (ttReloadInFlight) {
+    queueTtSyncReload(reason);
     return false;
   }
 
-  if (
-    reason !== "batch_next" &&
-    !isNewTicket &&
-    now - lastTtAutoReloadAt < TT_AUTO_RELOAD_COOLDOWN_MS
-  ) {
-    ttSyncReloadQueued = true;
-    ttSyncReloadQueuedReason = reason;
+  if (now < ttReloadCircuitOpenUntil && reason !== "batch_next") {
     return false;
   }
 
-  if (!isNewTicket && busy) {
-    ttSyncReloadQueued = true;
-    ttSyncReloadQueuedReason = reason;
+  // 来单同步允许在改标题中打断，避免「等列表 / 禁止 F5」死锁
+  if (isNormalizeInProgress() && reason !== "batch_next" && !isSyncReason) {
+    queueTtSyncReload(reason);
+    return false;
+  }
+
+  const cooldownMs = reason === "batch_next" ? TT_BATCH_RELOAD_COOLDOWN_MS : TT_AUTO_RELOAD_COOLDOWN_MS;
+  if (now - lastTtAutoReloadAt < cooldownMs) {
+    if (reason !== "batch_next") queueTtSyncReload(reason);
+    return false;
+  }
+
+  if (busy && reason !== "batch_next" && !isSyncReason) {
+    queueTtSyncReload(reason);
+    return false;
+  }
+
+  ttReloadRecentAt = ttReloadRecentAt.filter((t) => now - t < TT_RELOAD_CIRCUIT_WINDOW_MS);
+  if (reason !== "batch_next" && ttReloadRecentAt.length >= TT_RELOAD_CIRCUIT_MAX) {
+    ttReloadCircuitOpenUntil = now + TT_RELOAD_CIRCUIT_COOLDOWN_MS;
+    ttSyncReloadQueued = false;
+    ttSyncReloadQueuedReason = "";
+    log(
+      `页面自动刷新过于频繁，已暂停 ${Math.round(TT_RELOAD_CIRCUIT_COOLDOWN_MS / 60000)} 分钟自动刷新（可手动刷新）。`,
+      "warning"
+    );
     return false;
   }
 
   lastTtAutoReloadAt = now;
+  ttReloadRecentAt.push(now);
   ttSyncReloadQueued = false;
   ttSyncReloadQueuedReason = "";
+  ttReloadInFlight = true;
   webviewReady = false;
   setWebviewLoadingHint(true);
+  armTtReloadWatchdog();
 
   if (reason !== "batch_next") {
     log("正在刷新工单页面…", "info");
@@ -1271,9 +1445,8 @@ function requestTtWebviewReload(reason = "sync") {
   }
 
   if (!executeTtWebviewReload()) {
-    webviewReady = true;
-    setWebviewLoadingHint(false);
     pendingRunAfterReload = false;
+    markTtReloadFinished();
     log("工单页面刷新失败，请稍后重试。", "error");
     return false;
   }
@@ -1281,7 +1454,12 @@ function requestTtWebviewReload(reason = "sync") {
 }
 
 function tryFlushTtSyncReloadQueue() {
-  if (!ttSyncReloadQueued) return;
+  if (!ttSyncReloadQueued || ttReloadInFlight) return;
+  if (Date.now() < ttReloadCircuitOpenUntil) {
+    ttSyncReloadQueued = false;
+    ttSyncReloadQueuedReason = "";
+    return;
+  }
   const reason = ttSyncReloadQueuedReason || "sync";
   ttSyncReloadQueued = false;
   ttSyncReloadQueuedReason = "";
@@ -1307,7 +1485,7 @@ function restartRunningTimers() {
 
 function start() {
   if (running) return;
-  if (!ttWebview) {
+  if (!getAutomationWebview()) {
     log("程序初始化中，请稍后再试。", "error");
     return;
   }
@@ -1340,6 +1518,12 @@ function stop() {
   syncTitleOnNewButtonState();
   stopTimers();
   restartTitlePatrolTimer();
+  try {
+    TD.browser?.restoreBrowseSurfaceIfNeeded?.();
+    TD.browser?.clearOpsSurfaceResume?.();
+  } catch {
+    // ignore
+  }
   if (titleOnNewAutoEnabled) {
     log("已停止接单。来单改标题仍开启，会继续自动改标题。", "info");
   } else {
@@ -1354,9 +1538,66 @@ function toggleStartStop() {
   setRunningState(running);
 }
 
+async function handleAppCacheCleared(result) {
+  setActiveLeftTab("logs");
+  const items = Array.isArray(result?.items) ? result.items : [];
+  log("开始清理缓存…", "info");
+
+  if (!items.length) {
+    log("清理缓存未返回明细。", "warning");
+  } else {
+    for (const item of items) {
+      const name = String(item?.name || "未命名项");
+      const detail = String(item?.detail || "").trim();
+      const status = String(item?.status || "");
+      if (status === "ok") {
+        log(`已清理：${name}${detail ? ` — ${detail}` : ""}`, "success");
+      } else if (status === "skip") {
+        log(`跳过：${name}${detail ? ` — ${detail}` : ""}`, "info");
+      } else {
+        log(`失败：${name}${detail ? ` — ${detail}` : ""}`, "error");
+      }
+    }
+  }
+
+  // 渲染进程内存缓存
+  try {
+    TD.hfIssue?.clearMemoryCaches?.();
+    TD.burstOutbreak?.clearMemoryCaches?.();
+    TD.titleOps?.clearMemoryCaches?.();
+    log("已清理：内存缓存 — 城市库 / 高频扫描状态 / 标题扫描基线", "success");
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log(`失败：内存缓存 — ${msg}`, "error");
+  }
+
+  // PM 路径标记清理后重新同步
+  try {
+    localStorage.removeItem(STORAGE_KEYS.pmCsvPath);
+    updatePmCsvPathLabel("缓存已清理，准备重新同步");
+    log("已清理：PM 配置路径标记（localStorage）", "success");
+    const synced = await syncPmCsvFromS3?.({ silent: false });
+    if (synced?.ok) {
+      log("PM 表已从 S3 重新同步。", "success");
+    } else if (synced?.usedCache) {
+      log("PM 表重新同步失败，若仍有本地文件将继续使用。", "warning");
+    } else {
+      log("PM 表重新同步失败，可稍后点击「同步PM表」。", "warning");
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log(`PM 表重新同步异常：${msg}`, "warning");
+  }
+
+  const failed = items.some((x) => x?.status === "fail") || result?.ok === false;
+  log(
+    failed ? "缓存清理完成（部分项失败，详见上方日志）。" : "缓存清理完成。",
+    failed ? "warning" : "success"
+  );
+}
+
 function bindEvents() {
   if (startBtn) startBtn.addEventListener("change", toggleStartStop);
-  if (apiSettingsBtn) apiSettingsBtn.addEventListener("click", () => openApiSettingsModal());
   if (apiSettingsCloseBtn) apiSettingsCloseBtn.addEventListener("click", closeApiSettingsModal);
   if (apiSettingsCancelBtn) apiSettingsCancelBtn.addEventListener("click", closeApiSettingsModal);
   if (apiRgIdsAddBtn) apiRgIdsAddBtn.addEventListener("click", () => appendApiRgIdRow(""));
@@ -1398,24 +1639,22 @@ function bindEvents() {
       openApiSettingsModal().catch(() => {});
     });
   }
+  if (typeof window.ttDesktopApi?.onOpenBookmarkSettings === "function") {
+    window.ttDesktopApi.onOpenBookmarkSettings(() => {
+      TD.browser?.openBookmarkSettingsModal?.();
+    });
+  }
+  if (typeof window.ttDesktopApi?.onAppCacheCleared === "function") {
+    window.ttDesktopApi.onAppCacheCleared((result) => {
+      handleAppCacheCleared(result).catch(() => {});
+    });
+  }
   if (templatesSaveBtn) templatesSaveBtn.addEventListener("click", saveTemplatesModal);
   if (templatesAddRuleBtn) templatesAddRuleBtn.addEventListener("click", addRule);
   if (templatesPreviewBtn) {
     templatesPreviewBtn.addEventListener("click", () => {
       setActiveLeftTab("logs");
       previewTemplateMatchForActiveTicket();
-    });
-  }
-  if (openLogsDirBtn) {
-    openLogsDirBtn.addEventListener("click", async () => {
-      try {
-        const result = await window.ttDesktopApi?.openLogsDir?.();
-        if (typeof result === "string" && result.trim()) {
-          log("日志文件夹打开失败。", "warning");
-        }
-      } catch (err) {
-        log("日志文件夹打开失败。", "warning");
-      }
     });
   }
   if (tabLogsBtn) tabLogsBtn.addEventListener("click", () => setActiveLeftTab("logs"));
@@ -1649,7 +1888,8 @@ function bindEvents() {
     });
   }
 
-  if (!ttWebview) return;
+  const primaryWv = getAutomationWebview();
+  if (!primaryWv) return;
 
   // dom-ready 后再跑 executeJavaScript，避免与 guest 首屏绘制争抢
   const scheduleGuestIdleWork = (fn) => {
@@ -1664,21 +1904,21 @@ function bindEvents() {
     }
   };
 
-  ttWebview.addEventListener("dom-ready", async () => {
-    webviewReady = true;
-    setWebviewLoadingHint(false);
+  primaryWv.addEventListener("dom-ready", async () => {
+    markTtReloadFinished();
+    applyTtWebviewZoom(ttZoomFactor, { persist: false });
     log("工单页面已就绪。", "success");
     scheduleGuestIdleWork(async () => {
       await onTtPageLifecycle({ reset: true });
     });
   });
 
-  ttWebview.addEventListener("did-start-loading", () => {
+  primaryWv.addEventListener("did-start-loading", () => {
     webviewReady = false;
   });
 
-  ttWebview.addEventListener("did-stop-loading", () => {
-    webviewReady = true;
+  primaryWv.addEventListener("did-stop-loading", () => {
+    markTtReloadFinished();
     scheduleGuestIdleWork(async () => {
       await onTtPageLifecycle({ reset: false });
       commitPendingDomSyncAfterPageLoad();
@@ -1694,37 +1934,46 @@ function bindEvents() {
       } else {
         flushTitleOnNewQueueIfPossible().catch(() => {});
       }
-      setWebviewLoadingHint(false);
       tryFlushTtSyncReloadQueue();
     });
   });
 
-  ttWebview.addEventListener("did-fail-load", (event) => {
+  primaryWv.addEventListener("did-fail-load", () => {
     pendingRunAfterReload = false;
-    setWebviewLoadingHint(false);
+    markTtReloadFinished();
     if (batchInProgress) {
       log("页面加载失败，本轮接单已中止。", "warning");
       finishBatch();
     }
     log("工单页面加载失败，请检查网络连接。", "error");
+    tryFlushTtSyncReloadQueue();
   });
 
   // guest preload：仅 x.sankuai.com/bridge 中转（大象自定义协议由主进程 TT 专用 partition 的 webRequest 拦截，不碰 guest）
-  ttWebview.addEventListener("ipc-message", (event) => {
+  primaryWv.addEventListener("ipc-message", (event) => {
     const ch = event.channel;
     const arg0 = event.args && event.args[0];
+    if (ch === "tt-webview-zoom-delta") {
+      const dir = Number(arg0);
+      if (Number.isFinite(dir) && dir !== 0) nudgeTtWebviewZoom(dir);
+      return;
+    }
+    if (ch === "tt-webview-zoom-reset") {
+      applyTtWebviewZoom(1);
+      return;
+    }
     if (typeof arg0 !== "string" || !arg0.trim()) return;
     const u = arg0.trim();
     if (ch === "tt-bridge-in-webview") {
       setWebviewLoadingHint(true);
       try {
-        if (typeof ttWebview.loadURL === "function") {
-          void Promise.resolve(ttWebview.loadURL(u)).catch(() => {});
+        if (typeof primaryWv.loadURL === "function") {
+          void Promise.resolve(primaryWv.loadURL(u)).catch(() => {});
         } else {
-          ttWebview.setAttribute("src", u);
+          primaryWv.setAttribute("src", u);
         }
       } catch {
-        ttWebview.setAttribute("src", u);
+        primaryWv.setAttribute("src", u);
       }
       return;
     }
@@ -1733,15 +1982,32 @@ function bindEvents() {
     }
   });
 
+  document.addEventListener("tt-browser-zoom-ipc", (e) => {
+    const d = e.detail || {};
+    if (d.channel === "tt-webview-zoom-delta") {
+      const dir = Number(d.arg0);
+      if (Number.isFinite(dir) && dir !== 0) nudgeTtWebviewZoom(dir);
+    } else if (d.channel === "tt-webview-zoom-reset") {
+      applyTtWebviewZoom(1);
+    }
+  });
+
+  if (ttZoomLabel) {
+    ttZoomLabel.addEventListener("click", () => {
+      applyTtWebviewZoom(1);
+      log("内置 TT 缩放已恢复 100%。", "info");
+    });
+  }
+
   setWebviewLoadingHint(true);
   try {
-    ttWebview.setAttribute("partition", TT_WEBVIEW_PARTITION);
-    ttWebview.setAttribute("preload", new URL("webview-preload.js", document.baseURI).href);
-    ttWebview.setAttribute("src", TT_WEBVIEW_DEFAULT_SRC);
+    primaryWv.setAttribute("partition", TT_WEBVIEW_PARTITION);
+    primaryWv.setAttribute("preload", new URL("webview-preload.js", document.baseURI).href);
+    primaryWv.setAttribute("src", TT_WEBVIEW_DEFAULT_SRC);
   } catch {
     try {
-      ttWebview.setAttribute("partition", TT_WEBVIEW_PARTITION);
-      ttWebview.setAttribute("src", TT_WEBVIEW_DEFAULT_SRC);
+      primaryWv.setAttribute("partition", TT_WEBVIEW_PARTITION);
+      primaryWv.setAttribute("src", TT_WEBVIEW_DEFAULT_SRC);
     } catch {
       setWebviewLoadingHint(false);
     }
@@ -1970,7 +2236,7 @@ function bindModuleDeps() {
   TD.priority.bind({
     sleep,
     getWebviewReady: () => webviewReady,
-    getTtWebview: () => ttWebview,
+    getTtWebview: () => getAutomationWebview(),
     getRunning: () => running,
     getBusy: () => busy,
     getBatchInProgress: () => batchInProgress,
@@ -1990,7 +2256,7 @@ function bindModuleDeps() {
   TD.pm.bind({
     sleep,
     getWebviewReady: () => webviewReady,
-    getTtWebview: () => ttWebview,
+    getTtWebview: () => getAutomationWebview(),
     getBusy: () => busy,
     isNormalizeInProgress,
     isPriorityBatchInProgress: isBatchInProgress,
@@ -2009,7 +2275,7 @@ function bindModuleDeps() {
       return !!st?.ok;
     },
     getWebviewReady: () => webviewReady,
-    getTtWebview: () => ttWebview,
+    getTtWebview: () => getAutomationWebview(),
     isTicketBatchSelected,
     setTicketBatchSelected,
     updateBatchPrioritySelectionCount,
@@ -2065,7 +2331,7 @@ function bindModuleDeps() {
     getTickets,
     getRunning: () => running,
     getWebviewReady: () => webviewReady,
-    getTtWebview: () => ttWebview,
+    getTtWebview: () => getAutomationWebview(),
     getBusy: () => busy,
     getBatchInProgress: () => batchInProgress,
     getPendingRunAfterReload: () => pendingRunAfterReload,
@@ -2095,6 +2361,7 @@ function init() {
   syncTitleOnNewButtonState();
   if (ticketTitleNormalizeBtn) ticketTitleNormalizeBtn.disabled = running;
   updatePmCsvPathLabel();
+  ensurePmCsvReady?.();
   updateTicketCount(NaN);
   updateNextTickDisplay();
   setRunningState(false);
@@ -2102,6 +2369,14 @@ function init() {
   updateTicketMeta(0);
   updateBatchPrioritySelectionCount();
   syncSortButtonText();
+  if (TD.browser?.init) {
+    TD.browser.init({
+      onActiveTabChange: () => {
+        applyTtWebviewZoom(ttZoomFactor, { persist: false });
+        TD.browser?.updateAddressBar?.();
+      }
+    });
+  }
   bindEvents();
   void applyAppVersionDisplay();
   void logTtApiConfigStatus().then(() => setupApiTicketPolling());

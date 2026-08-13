@@ -35,58 +35,21 @@
 
 /** @typedef {{ name: string, mis: string }} PmMember */
 /** @typedef {{ enabled: boolean, region_key: string, members: PmMember[], note: string }} PmCsvRule */
+/** @typedef {{ line: number, region: string, raw: string, reason: string }} PmParseWarning */
 
-/** members_mis 单元格内多人：; 或 ； 或 :（Excel 里常误用冒号） */
-function splitPmMembersCell(membersCell) {
-  return String(membersCell || "")
-    .split(/[;；:]/)
-    .map((s) => s.trim())
-    .filter(Boolean);
+function isTruthyEnabled(cell) {
+  const s = String(cell == null ? "1" : cell).trim();
+  if (!s) return true;
+  return s === "1" || s.toLowerCase() === "true" || s === "是" || s.toLowerCase() === "yes";
 }
 
-function parsePmCsvContent(text) {
-  const raw = String(text || "").replace(/^\uFEFF/, "");
-  const lines = raw
-    .split(/\r?\n/)
-    .map((l) => l.trim())
+/** 多人分隔：; ； 以及 : / ::（Excel 常误用冒号） */
+function splitPmMembersCell(membersCell) {
+  return String(membersCell || "")
+    .replace(/::+/g, ";")
+    .split(/[;；:|｜、，]/)
+    .map((s) => s.trim())
     .filter(Boolean);
-  if (!lines.length) return { rules: [], error: "empty" };
-  const header = lines[0].split(",").map((c) => c.trim().toLowerCase());
-  const idxEn = header.indexOf("enabled");
-  const idxRk = header.indexOf("region_key");
-  const idxMm = header.indexOf("members_mis");
-  const idxNote = header.indexOf("note");
-  if (idxRk < 0 || idxMm < 0) return { rules: [], error: "bad_header" };
-  const rules = [];
-  for (let i = 1; i < lines.length; i += 1) {
-    const row = lines[i];
-    const parts = row.split(",").map((c) => c.trim());
-    if (parts.length < idxMm + 1) continue;
-    const enabledCell = idxEn >= 0 ? String(parts[idxEn] || "").trim() : "1";
-    const region_key = String(parts[idxRk] || "").trim();
-    if (!region_key) continue;
-    let membersCell = "";
-    let note = "";
-    if (idxNote > idxMm) {
-      membersCell = parts.slice(idxMm, idxNote).join(",").trim();
-      note = parts.slice(idxNote).join(",").trim();
-    } else {
-      membersCell = parts.slice(idxMm).join(",").trim();
-    }
-    const memberMap = new Map();
-    for (const part of splitPmMembersCell(membersCell)) {
-      const m = parsePmMemberToken(part);
-      if (!m.mis) continue;
-      if (!memberMap.has(m.mis)) memberMap.set(m.mis, m);
-    }
-    rules.push({
-      enabled: enabledCell === "1" || enabledCell.toLowerCase() === "true" || enabledCell === "是",
-      region_key,
-      members: Array.from(memberMap.values()),
-      note
-    });
-  }
-  return { rules, error: "" };
 }
 
 function normalizePmMisToken(tok) {
@@ -100,10 +63,28 @@ function normalizePmMisToken(tok) {
     .replace(/[^a-z0-9._-]/g, "");
 }
 
-/** 解析 CSV 单元格：须为「姓名/MIS」，拉 PM 时姓名与 MIS 双重校验 */
+function looksLikeMisToken(tok) {
+  const s = String(tok || "").trim().toLowerCase();
+  if (!s) return false;
+  if (/^wb_[a-z0-9._-]{2,}$/i.test(s)) return true;
+  // 纯 MIS：字母开头，允许数字下划线点，长度合理，且不含中文
+  if (/[\u4e00-\u9fff]/.test(s)) return false;
+  return /^[a-z][a-z0-9._-]{1,40}$/i.test(s);
+}
+
+/**
+ * 智能解析单人 token（方案 A）
+ * 支持：姓名/MIS、姓名 MIS、姓名wb_mis 粘连、仅 MIS
+ * @returns {{ name: string, mis: string, ok: boolean, reason?: string, mode?: string }}
+ */
 function parsePmMemberToken(tok) {
-  const s = String(tok || "").trim();
-  if (!s) return { name: "", mis: "" };
+  let s = String(tok || "").trim();
+  if (!s) return { name: "", mis: "", ok: false, reason: "empty" };
+  // 去掉包裹引号
+  s = s.replace(/^["']+|["']+$/g, "").trim();
+  if (!s) return { name: "", mis: "", ok: false, reason: "empty" };
+
+  // 1) 标准：姓名/MIS（斜杠）
   if (s.includes("/")) {
     const parts = s.split("/").map((x) => x.trim()).filter(Boolean);
     if (parts.length >= 2) {
@@ -113,16 +94,285 @@ function parsePmMemberToken(tok) {
         .join("/")
         .replace(/^\/+/, "")
         .trim();
-      return { name, mis };
+      if (mis) return { name, mis, ok: true, mode: "slash" };
+      return { name: "", mis: "", ok: false, reason: "bad_mis_after_slash", raw: s };
     }
   }
-  return { name: "", mis: "" };
+
+  // 2) 空格/全角空格分隔：姓名 MIS
+  {
+    const parts = s.split(/[\s\u3000]+/).map((x) => x.trim()).filter(Boolean);
+    if (parts.length >= 2) {
+      const last = parts[parts.length - 1];
+      if (looksLikeMisToken(last)) {
+        return {
+          name: parts.slice(0, -1).join(" ").trim(),
+          mis: normalizePmMisToken(last),
+          ok: true,
+          mode: "space"
+        };
+      }
+    }
+  }
+
+  // 3) 粘连：中文/英文名 + wb_xxx 或 名+纯mis（如 胡海wb_huhai）
+  {
+    const mWb = s.match(/^(.*?)(wb_[a-z0-9._-]{2,})$/i);
+    if (mWb) {
+      const name = String(mWb[1] || "").trim();
+      const mis = normalizePmMisToken(mWb[2]);
+      if (mis) return { name, mis, ok: true, mode: name ? "stuck_wb" : "mis_only" };
+    }
+    // 结尾是像 MIS 的英文段，前面有中文
+    const mTail = s.match(/^([\u4e00-\u9fffA-Za-z·•.\s]{1,40}?)([a-z][a-z0-9._-]{2,40})$/i);
+    if (mTail && /[\u4e00-\u9fff]/.test(mTail[1] || "") && looksLikeMisToken(mTail[2])) {
+      return {
+        name: String(mTail[1] || "").trim(),
+        mis: normalizePmMisToken(mTail[2]),
+        ok: true,
+        mode: "stuck_mis"
+      };
+    }
+  }
+
+  // 4) 仅 MIS
+  if (looksLikeMisToken(s)) {
+    return { name: "", mis: normalizePmMisToken(s), ok: true, mode: "mis_only" };
+  }
+
+  return { name: "", mis: "", ok: false, reason: "unrecognized", raw: s };
 }
 
 function formatPmMemberLabel(m) {
   if (!m) return "";
   if (m.name && m.mis) return `${m.name}/${m.mis}`;
   return m.mis || m.name || "";
+}
+
+function splitCsvLine(line) {
+  // 简单 CSV：按逗号切；若有引号字段则保留逗号
+  const s = String(line || "");
+  if (!s.includes('"')) return s.split(",").map((c) => c.trim());
+  const out = [];
+  let cur = "";
+  let inQ = false;
+  for (let i = 0; i < s.length; i += 1) {
+    const ch = s[i];
+    if (ch === '"') {
+      if (inQ && s[i + 1] === '"') {
+        cur += '"';
+        i += 1;
+      } else {
+        inQ = !inQ;
+      }
+      continue;
+    }
+    if (ch === "," && !inQ) {
+      out.push(cur.trim());
+      cur = "";
+      continue;
+    }
+    cur += ch;
+  }
+  out.push(cur.trim());
+  return out;
+}
+
+function mergeMemberIntoMap(memberMap, member) {
+  if (!member?.mis) return;
+  const prev = memberMap.get(member.mis);
+  if (!prev) {
+    memberMap.set(member.mis, { name: member.name || "", mis: member.mis });
+    return;
+  }
+  // 已有条目缺姓名时，用新解析补上
+  if (!prev.name && member.name) prev.name = member.name;
+}
+
+/**
+ * 解析 PM.csv
+ * - 旧格式：enabled,region_key,members_mis,note（一格多人）
+ * - 新格式（方案 B）：enabled,region_key,member_name,member_mis,note（一人一行，同地区自动合并）
+ * - 智能解析（方案 A）：容错多种写法；返回 warnings 供校验报告（方案 D）
+ */
+function parsePmCsvContent(text) {
+  const raw = String(text || "").replace(/^\uFEFF/, "");
+  const lines = raw
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (!lines.length) {
+    return { rules: [], error: "empty", format: "", warnings: [], stats: null };
+  }
+
+  const header = splitCsvLine(lines[0]).map((c) => c.trim().toLowerCase());
+  const idxEn = header.indexOf("enabled");
+  const idxRk = header.indexOf("region_key");
+  const idxMm = header.indexOf("members_mis");
+  const idxName = header.findIndex((h) => h === "member_name" || h === "name" || h === "姓名");
+  const idxMis = header.findIndex((h) => h === "member_mis" || h === "mis" || h === "账号");
+  const idxNote = header.indexOf("note");
+
+  const rowPerMember = idxRk >= 0 && idxMis >= 0 && idxMm < 0;
+  const legacy = idxRk >= 0 && idxMm >= 0;
+  if (!rowPerMember && !legacy) {
+    return { rules: [], error: "bad_header", format: "", warnings: [], stats: null };
+  }
+
+  const format = rowPerMember ? "row_per_member" : "legacy";
+  /** @type {Map<string, { enabled: boolean, region_key: string, members: Map<string, PmMember>, note: string, lines: number[] }>} */
+  const regionMap = new Map();
+  /** @type {PmParseWarning[]} */
+  const warnings = [];
+  let skippedTokens = 0;
+  let misOnlyCount = 0;
+  let parsedTokenCount = 0;
+
+  function ensureRegion(region_key, enabled, note, lineNo) {
+    const key = String(region_key || "").trim();
+    let g = regionMap.get(key);
+    if (!g) {
+      g = {
+        enabled: !!enabled,
+        region_key: key,
+        members: new Map(),
+        note: String(note || "").trim(),
+        lines: [lineNo]
+      };
+      regionMap.set(key, g);
+      return g;
+    }
+    // 任一行为启用则整地区启用；note 取第一条非空
+    if (enabled) g.enabled = true;
+    if (!g.note && note) g.note = String(note).trim();
+    g.lines.push(lineNo);
+    return g;
+  }
+
+  for (let i = 1; i < lines.length; i += 1) {
+    const lineNo = i + 1;
+    const parts = splitCsvLine(lines[i]);
+    const enabled = isTruthyEnabled(idxEn >= 0 ? parts[idxEn] : "1");
+    const region_key = String(parts[idxRk] || "").trim();
+    if (!region_key) {
+      warnings.push({ line: lineNo, region: "", raw: lines[i], reason: "缺少 region_key" });
+      continue;
+    }
+    const note = idxNote >= 0 ? String(parts[idxNote] || "").trim() : "";
+
+    if (rowPerMember) {
+      const name = idxName >= 0 ? String(parts[idxName] || "").trim() : "";
+      const misRaw = String(parts[idxMis] || "").trim();
+      const mis = normalizePmMisToken(misRaw);
+      if (!mis) {
+        skippedTokens += 1;
+        warnings.push({
+          line: lineNo,
+          region: region_key,
+          raw: misRaw || name || lines[i],
+          reason: "一人一行缺少有效 member_mis"
+        });
+        continue;
+      }
+      const g = ensureRegion(region_key, enabled, note, lineNo);
+      mergeMemberIntoMap(g.members, { name, mis });
+      parsedTokenCount += 1;
+      if (!name) misOnlyCount += 1;
+      continue;
+    }
+
+    // legacy：一格多人
+    let membersCell = "";
+    if (idxNote > idxMm) {
+      membersCell = parts.slice(idxMm, idxNote).join(",").trim();
+    } else {
+      membersCell = parts.slice(idxMm).join(",").trim();
+    }
+    const g = ensureRegion(region_key, enabled, note, lineNo);
+    if (!membersCell) {
+      warnings.push({ line: lineNo, region: region_key, raw: "", reason: "members_mis 为空" });
+      continue;
+    }
+    for (const part of splitPmMembersCell(membersCell)) {
+      const m = parsePmMemberToken(part);
+      if (!m.ok || !m.mis) {
+        skippedTokens += 1;
+        warnings.push({
+          line: lineNo,
+          region: region_key,
+          raw: part,
+          reason: m.reason === "unrecognized" ? "无法识别为「姓名/MIS」或 MIS" : m.reason || "解析失败"
+        });
+        continue;
+      }
+      mergeMemberIntoMap(g.members, { name: m.name || "", mis: m.mis });
+      parsedTokenCount += 1;
+      if (!m.name) misOnlyCount += 1;
+    }
+  }
+
+  const rules = Array.from(regionMap.values()).map((g) => ({
+    enabled: g.enabled,
+    region_key: g.region_key,
+    members: Array.from(g.members.values()),
+    note: g.note
+  }));
+
+  const enabledRules = rules.filter((r) => r.enabled);
+  const stats = {
+    format,
+    regions: rules.length,
+    enabledRegions: enabledRules.length,
+    members: enabledRules.reduce((n, r) => n + (r.members?.length || 0), 0),
+    parsedTokens: parsedTokenCount,
+    skippedTokens,
+    misOnlyCount,
+    warningCount: warnings.length
+  };
+
+  return { rules, error: "", format, warnings, stats };
+}
+
+/** 方案 D：把解析结果写到执行日志 */
+function logPmCsvValidationReport(parsed, { silent = false, source = "同步" } = {}) {
+  if (!parsed || parsed.error === "empty") {
+    if (!silent) log(`PM 表${source}失败：文件为空。`, "error");
+    return;
+  }
+  if (parsed.error === "bad_header") {
+    if (!silent) {
+      log(
+        `PM 表${source}失败：表头不正确。\n` +
+          `  支持旧格式：enabled,region_key,members_mis,note\n` +
+          `  或一人一行：enabled,region_key,member_name,member_mis,note`,
+        "error"
+      );
+    }
+    return;
+  }
+  const st = parsed.stats || {};
+  const fmtLabel = st.format === "row_per_member" ? "一人一行" : "地区多人合格";
+  const head =
+    `PM 表${source}完成：格式「${fmtLabel}」· 启用 ${st.enabledRegions || 0}/${st.regions || 0} 个地区 · ` +
+    `人员 ${st.members || 0} 人` +
+    (st.misOnlyCount ? `（其中仅 MIS ${st.misOnlyCount} 人）` : "");
+  if (!silent) log(head, "success");
+
+  const warnings = Array.isArray(parsed.warnings) ? parsed.warnings : [];
+  if (!warnings.length) return;
+
+  const maxShow = silent ? 3 : 12;
+  const lines = warnings.slice(0, maxShow).map((w) => {
+    const loc = w.region ? `第${w.line}行「${w.region}」` : `第${w.line}行`;
+    const raw = w.raw ? `「${w.raw}」` : "";
+    return `  · ${loc}${raw}：${w.reason}`;
+  });
+  const more =
+    warnings.length > maxShow ? `\n  · …另有 ${warnings.length - maxShow} 条警告未显示` : "";
+  log(
+    `PM 表校验警告 ${warnings.length} 条（已跳过无效项，不影响已识别人员）：\n${lines.join("\n")}${more}`,
+    "warning"
+  );
 }
 
 function matchPmRuleForTicket(rules, architectureRaw, title) {
@@ -153,10 +403,84 @@ function setPmPullBusy(busy) {
   if (D.ticketRefreshBtn) D.ticketRefreshBtn.disabled = b;
 }
 
-function updatePmCsvPathLabel() {
+function updatePmCsvPathLabel(extra) {
   if (!D.pmCsvPathLabel) return;
   const p = (localStorage.getItem(STORAGE_KEYS.pmCsvPath) || "").trim();
-  D.pmCsvPathLabel.textContent = p ? `PM配置：${p}` : "PM配置：未选择";
+  const hint = String(extra || "").trim();
+  if (!p) {
+    D.pmCsvPathLabel.textContent = hint || "PM配置：未同步";
+    return;
+  }
+  D.pmCsvPathLabel.textContent = hint ? `PM配置：${p}（${hint}）` : `PM配置：${p}`;
+}
+
+/**
+ * 从 S3Plus 拉取 PM.csv → 写入程序目录 → 自动记为当前配置
+ * @param {{ silent?: boolean }} [options]
+ */
+async function syncPmCsvFromS3(options = {}) {
+  const silent = !!options.silent;
+  try {
+    if (!silent) log("正在同步 PM 表…", "info");
+    const res = await window.ttDesktopApi?.syncPmCsvFromS3?.();
+    if (!res?.ok) {
+      const st = await window.ttDesktopApi?.getPmCsvStatus?.();
+      if (st?.ok && st.path) {
+        localStorage.setItem(STORAGE_KEYS.pmCsvPath, st.path);
+        updatePmCsvPathLabel("同步失败，使用本地缓存");
+        if (!silent) {
+          log(`PM 表同步失败，已改用本地缓存：${st.path}`, "warning");
+        }
+        return { ok: false, usedCache: true, path: st.path, message: res?.message || "" };
+      }
+      updatePmCsvPathLabel("同步失败");
+      if (!silent) {
+        log(`PM 表同步失败：${res?.message || "未知错误"}`, "error");
+      }
+      return { ok: false, usedCache: false, message: res?.message || "" };
+    }
+
+    const parsed = parsePmCsvContent(res.content || "");
+    if (parsed.error === "bad_header" || parsed.error === "empty" || !parsed.rules.length) {
+      updatePmCsvPathLabel("格式错误");
+      logPmCsvValidationReport(parsed, { silent: false, source: "同步" });
+      return { ok: false, message: parsed.error || "empty_rules" };
+    }
+
+    localStorage.setItem(STORAGE_KEYS.pmCsvPath, res.path || "");
+    const enabledCount = parsed.rules.filter((r) => r.enabled).length;
+    const memberCount = parsed.stats?.members || 0;
+    updatePmCsvPathLabel(`已同步 · ${enabledCount} 地区 / ${memberCount} 人`);
+    logPmCsvValidationReport(parsed, { silent, source: "同步" });
+    return { ok: true, path: res.path, enabledCount, stats: parsed.stats, warnings: parsed.warnings };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    updatePmCsvPathLabel("同步异常");
+    if (!silent) log("PM 表同步异常，请稍后重试。", "error");
+    return { ok: false, message: msg };
+  }
+}
+
+/** 按钮入口：同步远程 PM 表 */
+async function selectPmCsvFile() {
+  return syncPmCsvFromS3({ silent: false });
+}
+
+async function ensurePmCsvReady() {
+  try {
+    const st = await window.ttDesktopApi?.getPmCsvStatus?.();
+    if (st?.ok && st.path) {
+      localStorage.setItem(STORAGE_KEYS.pmCsvPath, st.path);
+      updatePmCsvPathLabel("本地已就绪");
+    }
+  } catch (_) {}
+  setTimeout(() => {
+    void syncPmCsvFromS3({ silent: true }).then((r) => {
+      if (r?.ok || r?.usedCache) return;
+      const p = (localStorage.getItem(STORAGE_KEYS.pmCsvPath) || "").trim();
+      if (!p) log("PM 表尚未同步，可点击「同步PM表」手动拉取。", "warning");
+    });
+  }, 2500);
 }
 
 /**
@@ -165,7 +489,7 @@ function updatePmCsvPathLabel() {
  */
 function buildPullPmMembersScript(targets) {
   const safe = JSON.stringify(
-    (Array.isArray(targets) ? targets : []).filter((t) => t && t.mis && t.name)
+    (Array.isArray(targets) ? targets : []).filter((t) => t && t.mis)
   );
   return `
     (async () => {
@@ -370,17 +694,18 @@ function buildPullPmMembersScript(targets) {
         const wantMis = normalizeMisKey(target.mis);
         const wantName = normalizeNameKey(target.name);
         if (!wantMis) return { ok: false, reason: 'empty_mis' };
-        if (!wantName) return { ok: false, reason: 'empty_name' };
         const end = Date.now() + 8000;
         while (Date.now() < end) {
-          const strict = collectStrictMatches(modal, target);
-          if (strict.length === 1) {
-            clickCandidate(strict[0]);
-            return { ok: true, picked: strict[0].raw, mode: 'strict' };
-          }
-          if (strict.length > 1) {
-            const names = strict.map((m) => m.raw).slice(0, 5).join(' | ');
-            return { ok: false, reason: 'ambiguous', detail: names, count: strict.length };
+          if (wantName) {
+            const strict = collectStrictMatches(modal, target);
+            if (strict.length === 1) {
+              clickCandidate(strict[0]);
+              return { ok: true, picked: strict[0].raw, mode: 'strict' };
+            }
+            if (strict.length > 1) {
+              const names = strict.map((m) => m.raw).slice(0, 5).join(' | ');
+              return { ok: false, reason: 'ambiguous', detail: names, count: strict.length };
+            }
           }
 
           const misOnly = collectMisMatches(modal, target);
@@ -389,16 +714,18 @@ function buildPullPmMembersScript(targets) {
             return {
               ok: true,
               picked: misOnly[0].raw,
-              mode: 'mis_only',
-              configName: target.name,
+              mode: wantName ? 'mis_only' : 'mis_only_config',
+              configName: target.name || '',
               gotName: misOnly[0].name
             };
           }
           if (misOnly.length > 1) {
-            const byName = misOnly.filter((c) => nameKeysEquivalent(target.name, c.name));
-            if (byName.length === 1) {
-              clickCandidate(byName[0]);
-              return { ok: true, picked: byName[0].raw, mode: 'strict' };
+            if (wantName) {
+              const byName = misOnly.filter((c) => nameKeysEquivalent(target.name, c.name));
+              if (byName.length === 1) {
+                clickCandidate(byName[0]);
+                return { ok: true, picked: byName[0].raw, mode: 'strict' };
+              }
             }
             const names = misOnly.map((m) => m.raw).slice(0, 5).join(' | ');
             return { ok: false, reason: 'ambiguous', detail: names, count: misOnly.length };
@@ -470,8 +797,8 @@ function buildPullPmMembersScript(targets) {
       }
 
       for (const target of targets) {
-        if (!target || !target.mis || !target.name) continue;
-        const label = target.name + '/' + target.mis;
+        if (!target || !target.mis) continue;
+        const label = target.name ? target.name + '/' + target.mis : target.mis;
         const pick = await searchAndPick(target);
         if (!pick.ok) {
           if (pick.reason === 'ambiguous') {
@@ -482,15 +809,15 @@ function buildPullPmMembersScript(targets) {
           }
           continue;
         }
-        if (pick.mode === 'mis_only') {
+        if (pick.mode === 'mis_only' || pick.mode === 'mis_only_config') {
           logs.push(
             '已选择：' +
               (pick.picked || label) +
-              '（MIS 唯一命中；TT 姓名「' +
-              (pick.gotName || '') +
-              '」与配置「' +
-              (pick.configName || target.name) +
-              '」不完全一致）'
+              '（MIS 唯一命中' +
+              (pick.configName
+                ? '；配置姓名「' + pick.configName + '」与 TT「' + (pick.gotName || '') + '」不完全一致'
+                : '；配置未填姓名') +
+              '）'
           );
         } else {
           logs.push('已选择：' + (pick.picked || label) + '（姓名+MIS 校验通过）');
@@ -508,28 +835,6 @@ function buildPullPmMembersScript(targets) {
       return { ok: true, logs };
     })()
   `;
-}
-
-async function selectPmCsvFile() {
-  try {
-    const res = await window.ttDesktopApi?.selectAndReadPmCsv?.();
-    if (!res || res.canceled) return;
-    if (!res.ok) {
-      log("配置文件加载失败，请检查文件格式。", "error");
-      return;
-    }
-    const parsed = parsePmCsvContent(res.content || "");
-    if (parsed.error === "bad_header") {
-      log("配置文件格式不正确，请使用标准模板。", "error");
-      return;
-    }
-    localStorage.setItem(STORAGE_KEYS.pmCsvPath, res.path || "");
-    updatePmCsvPathLabel();
-    log(`PM 配置已加载，共 ${parsed.rules.filter((r) => r.enabled).length} 条规则。`, "success");
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    log("配置文件加载异常，请稍后重试。", "error");
-  }
 }
 
 async function runPmPullByRegion() {
@@ -555,9 +860,13 @@ async function runPmPullByRegion() {
     return;
   }
 
-  const csvPath = (localStorage.getItem(STORAGE_KEYS.pmCsvPath) || "").trim();
+  let csvPath = (localStorage.getItem(STORAGE_KEYS.pmCsvPath) || "").trim();
   if (!csvPath) {
-    log("请先选择 PM 配置文件。", "warning");
+    const synced = await syncPmCsvFromS3({ silent: false });
+    csvPath = (localStorage.getItem(STORAGE_KEYS.pmCsvPath) || synced?.path || "").trim();
+  }
+  if (!csvPath) {
+    log("请先同步 PM 表。", "warning");
     return;
   }
 
@@ -569,7 +878,18 @@ async function runPmPullByRegion() {
 
   setPmPullBusy(true);
   deps.setActiveLeftTab("logs");
+  let switchedFromBrowse = false;
   try {
+    try {
+      const sw = window.TTDesktop?.browser?.ensureOpsSurface?.();
+      switchedFromBrowse = !!sw?.switched;
+      if (switchedFromBrowse) {
+        log("已切换到接单 TT 以拉人（结束后可回到浏览标签）。", "muted");
+        await sleep(200);
+      }
+    } catch {
+      // ignore
+    }
     const opened = await deps.handleTicketClick(active, { skipRefresh: true });
     if (!opened) {
       log("无法打开工单，已取消拉人。", "error");
@@ -587,9 +907,14 @@ async function runPmPullByRegion() {
       return;
     }
     const parsed = parsePmCsvContent(fileRes.content || "");
-    if (!parsed.rules.length) {
-      log("配置文件为空，请检查内容。", "error");
+    if (parsed.error || !parsed.rules.length) {
+      logPmCsvValidationReport(parsed, { silent: false, source: "读取" });
+      log("配置文件为空或格式不正确，请检查内容。", "error");
       return;
+    }
+    if (parsed.warnings?.length) {
+      // 拉人时若本地表有问题，给简要提示（完整报告同步时已打过）
+      log(`当前 PM 表有 ${parsed.warnings.length} 条校验警告，异常项已跳过。`, "warning");
     }
 
     const rule = matchPmRuleForTicket(parsed.rules, arch, title);
@@ -602,18 +927,23 @@ async function runPmPullByRegion() {
       return;
     }
 
-    const pmTargets = rule.members.filter((m) => m && m.mis && m.name);
-    const pmSkipped = rule.members.filter((m) => !m || !m.mis || !m.name);
+    const pmTargets = rule.members.filter((m) => m && m.mis);
+    const pmSkipped = rule.members.filter((m) => !m || !m.mis);
     if (pmSkipped.length) {
-      log(`部分人员信息不完整，已跳过。`, "warning");
+      log(`部分人员缺少 MIS，已跳过。`, "warning");
     }
     if (!pmTargets.length) {
       log(`地区「${rule.region_key}」没有可用人员，请检查配置。`, "warning");
       return;
     }
 
-    const memberLabels = pmTargets.map((m) => formatPmMemberLabel(m)).join("、");
-    log(`地区「${rule.region_key}」匹配成功，将添加 ${pmTargets.length} 人。`, "info");
+    const misOnly = pmTargets.filter((m) => !m.name).length;
+    log(
+      `地区「${rule.region_key}」匹配成功，将添加 ${pmTargets.length} 人` +
+        (misOnly ? `（其中 ${misOnly} 人仅有 MIS）` : "") +
+        `。`,
+      "info"
+    );
 
     const res = await ttExecuteJavaScript(buildPullPmMembersScript(pmTargets));
     if (!res?.ok) {
@@ -628,6 +958,15 @@ async function runPmPullByRegion() {
     log("拉人异常，请稍后重试。", "error");
   } finally {
     setPmPullBusy(false);
+    try {
+      if (switchedFromBrowse && window.TTDesktop?.browser?.restoreBrowseSurfaceIfNeeded?.()) {
+        log("拉人结束，已回到浏览标签。", "muted");
+      } else {
+        window.TTDesktop?.browser?.clearOpsSurfaceResume?.();
+      }
+    } catch {
+      // ignore
+    }
     await deps.refreshTickets({ reset: false });
   }
 }
@@ -640,6 +979,10 @@ async function runPmPullByRegion() {
     isPullInProgress,
     updatePmCsvPathLabel,
     selectPmCsvFile,
-    runPmPullByRegion
+    syncPmCsvFromS3,
+    ensurePmCsvReady,
+    runPmPullByRegion,
+    parsePmCsvContent,
+    parsePmMemberToken
   };
 })(window.TTDesktop);

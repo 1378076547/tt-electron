@@ -18,6 +18,13 @@
     DEFAULT_SLA_WARN_HOURS: 40,
     DEFAULT_SLA_OVERDUE_HOURS: 48,
     SLA_ALERT_COOLDOWN_MS: 30 * 60 * 1000,
+    /** 内置 TT 浏览器缩放：最小 80%，避免过小影响点选/自动化观感 */
+    TT_ZOOM_MIN: 0.8,
+    TT_ZOOM_MAX: 2,
+    TT_ZOOM_STEP: 0.1,
+    TT_TAB_MAX: 20,
+    TT_BOOKMARK_OPEN_NEW_TAB: "new_tab",
+    TT_BOOKMARK_OPEN_CURRENT: "current_tab",
     STORAGE_KEYS: {
       handler: "tt_handler",
       interval: "tt_interval_sec",
@@ -31,7 +38,12 @@
       elephantMessageEn: "tt_elephant_message_en",
       elephantRules: "tt_elephant_rules_v2",
       slaReminderEnabled: "tt_sla_reminder_enabled",
-      slaNotifyWindows: "tt_sla_notify_windows"
+      slaNotifyWindows: "tt_sla_notify_windows",
+      ttZoomFactor: "tt_webview_zoom_factor",
+      leftPanelCollapsed: "tt_left_panel_collapsed",
+      ttBookmarks: "tt_browser_bookmarks_v1",
+      ttBookmarksV2: "tt_browser_bookmarks_v2",
+      ttBookmarkOpenMode: "tt_bookmark_open_mode"
     },
     TICKET_CATEGORY_RULES: [
       { key: "monitor", label: "监控类", keywords: ["监控", "摄像头", "cctv", "黑屏", "花屏", "回放", "录像"] },
@@ -42,6 +54,9 @@
     TARGET_RG_IDS: [13619, 8238, 8200, 4967],
     TARGET_FILTER_IDS: [7599],
     TT_WEBVIEW_PARTITION: "persist:tt-desktop-tt-guest",
-    TT_WEBVIEW_DEFAULT_SRC: "https://tt.sankuai.com/ticket/handle?filter=todo"
+    TT_WEBVIEW_DEFAULT_SRC: "https://tt.sankuai.com/ticket/handle?filter=todo",
+    /** PM 对照表：S3Plus 对象直链（勿用 CDN，当前 CDN 会 403） */
+    PM_CSV_REMOTE_URL: "https://s3plus.sankuai.com/static-bucket/4000%20Agent%20Tools/Synchronize/PM.csv",
+    PM_CSV_FILENAME: "PM.csv"
   };
 })(window.TTDesktop = window.TTDesktop || {});

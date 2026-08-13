@@ -59,3 +59,40 @@ document.addEventListener(
   },
   true
 );
+
+/** Ctrl/Cmd + 滚轮 → 主机缩放内置 TT（最小 80%） */
+window.addEventListener(
+  "wheel",
+  function (e) {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    e.preventDefault();
+    const delta = Number(e.deltaY) || 0;
+    if (!delta) return;
+    ipcRenderer.sendToHost("tt-webview-zoom-delta", delta > 0 ? -1 : 1);
+  },
+  { passive: false, capture: true }
+);
+
+/** Ctrl/Cmd + 0 重置；+/- 缩放 */
+window.addEventListener(
+  "keydown",
+  function (e) {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    const key = String(e.key || "");
+    if (key === "0" || key === "Digit0" || e.code === "Digit0" || e.code === "Numpad0") {
+      e.preventDefault();
+      ipcRenderer.sendToHost("tt-webview-zoom-reset");
+      return;
+    }
+    if (key === "+" || key === "=" || e.code === "Equal" || e.code === "NumpadAdd") {
+      e.preventDefault();
+      ipcRenderer.sendToHost("tt-webview-zoom-delta", 1);
+      return;
+    }
+    if (key === "-" || key === "_" || e.code === "Minus" || e.code === "NumpadSubtract") {
+      e.preventDefault();
+      ipcRenderer.sendToHost("tt-webview-zoom-delta", -1);
+    }
+  },
+  true
+);

@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <title>TTDesktop1.0 桌面版</title>
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; frame-src https://tt.sankuai.com https://*.sankuai.com;" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; frame-src https: http: data: blob:;" />
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
@@ -50,20 +50,23 @@
             </span>
             <span class="start-switch-label" id="startSwitchLabel">关</span>
           </label>
-          <button id="apiSettingsBtn" class="api-settings-btn" type="button" title="填写 API 令牌、MIS 与工单组（无需记事本改 JSON）">
-            API 设置
-          </button>
         </div>
       </header>
 
-      <main class="main-layout">
-        <section class="log-panel">
+      <main class="main-layout" id="mainLayout">
+        <button id="leftPanelRail" class="left-panel-rail" type="button" hidden title="展开左侧面板（Ctrl+\\）" aria-label="展开左侧面板">
+          ▶
+        </button>
+        <section class="log-panel" id="logPanel">
           <div class="left-tabs">
-            <button id="tabLogsBtn" class="left-tab left-tab-active" type="button">执行日志</button>
-            <button id="tabTicketsBtn" class="left-tab" type="button">工单</button>
-            <button id="tabTemplatesBtn" class="left-tab" type="button">话术</button>
-            <div class="left-tabs-spacer"></div>
-            <button id="openLogsDirBtn" class="left-tab-action" type="button">打开日志</button>
+            <button id="leftPanelCollapseBtn" class="left-panel-collapse-btn" type="button" title="收起左侧面板（Ctrl+\\）" aria-label="收起左侧面板">
+              ◀
+            </button>
+            <div class="left-tabs-nav" role="tablist" aria-label="左侧面板">
+              <button id="tabLogsBtn" class="left-tab left-tab-active" type="button">日志</button>
+              <button id="tabTicketsBtn" class="left-tab" type="button">工单</button>
+              <button id="tabTemplatesBtn" class="left-tab" type="button">话术</button>
+            </div>
           </div>
 
           <div id="panelLogs" class="left-panel left-panel-active">
@@ -139,15 +142,15 @@
                   >
                     来单改标题
                   </button>
-                  <button id="pmCsvSelectBtn" class="ticket-toolbar-action" type="button" title="选择地区与人员对照表">
-                    选择PM配置
+                  <button id="pmCsvSelectBtn" class="ticket-toolbar-action" type="button" title="从 S3 同步 PM.csv 到程序目录并自动配置">
+                    同步PM表
                   </button>
                   <button id="pmPullByRegionBtn" class="ticket-toolbar-action ticket-toolbar-action--accent" type="button" title="先选中工单，再根据工单地区自动添加对应 PM 到大象群">
                     按地区拉PM
                   </button>
                 </div>
               </div>
-              <div class="ticket-pm-csv-hint" id="pmCsvPathLabel" aria-live="polite">PM配置：未选择</div>
+              <div class="ticket-pm-csv-hint" id="pmCsvPathLabel" aria-live="polite">PM配置：未同步</div>
               <div class="ticket-batch-bar" aria-label="批量优先级">
                 <button id="ticketBatchSelectVisibleBtn" class="ticket-batch-btn" type="button" title="勾选当前筛选结果中的全部工单">
                   全选可见
@@ -238,13 +241,98 @@
           </div>
         </section>
         <section class="web-panel">
-          <div class="web-header web-header-tt">
-            <span>内置 TT 浏览器</span>
-            <span id="webviewLoadingHint" class="webview-loading-badge" aria-live="polite">工单页面加载中…</span>
+          <div class="tt-tab-bar" aria-label="浏览器标签">
+            <div id="ttTabList" class="tt-tab-list" role="tablist"></div>
+            <button id="ttTabAddBtn" class="tt-tab-add" type="button" title="新建浏览标签（最多 20 个；接单请用 🔒 接单 TT）">+</button>
+            <span id="ttTabCount" class="tt-tab-count" aria-live="polite">1/20</span>
           </div>
-          <webview id="ttWebview" class="web-frame" allowpopups></webview>
+          <div class="tt-bookmark-bar" aria-label="书签收藏夹">
+            <button id="ttBookmarkAddBtn" class="tt-bookmark-add" type="button" title="将当前页添加到书签">★</button>
+            <div id="ttFolderList" class="tt-folder-list" role="tablist" aria-label="收藏夹"></div>
+            <span class="tt-bm-sep" aria-hidden="true"></span>
+            <div id="ttBookmarkChips" class="tt-bookmark-chips" aria-label="当前收藏夹书签"></div>
+          </div>
+          <div class="tt-address-bar" aria-label="地址栏">
+            <button id="ttNavBackBtn" class="tt-nav-btn" type="button" title="后退">←</button>
+            <button id="ttNavForwardBtn" class="tt-nav-btn" type="button" title="前进">→</button>
+            <button id="ttNavReloadBtn" class="tt-nav-btn" type="button" title="刷新">↻</button>
+            <input
+              id="ttAddressInput"
+              class="tt-address-input"
+              type="text"
+              spellcheck="false"
+              autocomplete="off"
+              placeholder="输入网址后回车或点前往"
+            />
+            <button id="ttAddressGoBtn" class="tt-address-go" type="button" title="前往">前往</button>
+            <button
+              type="button"
+              id="ttZoomLabel"
+              class="tt-zoom-label"
+              title="Ctrl+滚轮缩放（最小 80%）；点击恢复 100%"
+            >100%</button>
+            <span id="webviewLoadingHint" class="webview-loading-badge" aria-live="polite">加载中…</span>
+          </div>
+          <div id="ttWebviewHost" class="tt-webview-host">
+            <webview id="ttWebview" class="web-frame tt-webview-pane tt-webview-active" allowpopups data-tab-primary="1"></webview>
+          </div>
         </section>
       </main>
+    </div>
+
+    <div id="addBookmarkModal" class="api-settings-modal" hidden>
+      <div class="api-settings-backdrop" data-add-bookmark-close="1"></div>
+      <div class="api-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="addBookmarkTitleHeading">
+        <div class="api-settings-header">
+          <h2 id="addBookmarkTitleHeading">添加书签</h2>
+          <button id="addBookmarkCloseBtn" class="api-settings-close" type="button" aria-label="关闭">×</button>
+        </div>
+        <p class="api-settings-hint">支持 http/https。🔒 接单 TT 为操作专用（接单/话术/拉 PM）；其他网站请用副标签浏览。</p>
+        <label class="api-settings-field">
+          <span class="api-settings-label">名称</span>
+          <input id="addBookmarkTitle" class="api-settings-input" type="text" autocomplete="off" />
+        </label>
+        <label class="api-settings-field">
+          <span class="api-settings-label">网址</span>
+          <input id="addBookmarkUrl" class="api-settings-input" type="text" autocomplete="off" />
+        </label>
+        <label class="api-settings-field">
+          <span class="api-settings-label">收藏夹</span>
+          <select id="addBookmarkFolder" class="api-settings-input"></select>
+        </label>
+        <p id="addBookmarkError" class="api-settings-error" hidden aria-live="polite"></p>
+        <div class="api-settings-actions">
+          <div class="api-settings-actions-right">
+            <button id="addBookmarkCancelBtn" class="api-settings-btn-secondary" type="button">取消</button>
+            <button id="addBookmarkSaveBtn" class="api-settings-btn-primary" type="button">保存</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="bookmarkSettingsModal" class="api-settings-modal" hidden>
+      <div class="api-settings-backdrop" data-bookmark-settings-close="1"></div>
+      <div class="api-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="bookmarkSettingsTitle">
+        <div class="api-settings-header">
+          <h2 id="bookmarkSettingsTitle">书签设置</h2>
+          <button id="bookmarkSettingsCloseBtn" class="api-settings-close" type="button" aria-label="关闭">×</button>
+        </div>
+        <p class="api-settings-hint">选择点击书签时的打开方式。主标签为接单专用，即使选择「当前标签」也会自动开新标签。</p>
+        <label class="api-settings-field bookmark-open-option">
+          <input id="bookmarkOpenNewTab" name="bookmarkOpenMode" type="radio" value="new_tab" checked />
+          <span>总是开新标签（默认）</span>
+        </label>
+        <label class="api-settings-field bookmark-open-option">
+          <input id="bookmarkOpenCurrentTab" name="bookmarkOpenMode" type="radio" value="current_tab" />
+          <span>当前标签跳转（主标签除外）</span>
+        </label>
+        <div class="api-settings-actions">
+          <div class="api-settings-actions-right">
+            <button id="bookmarkSettingsCancelBtn" class="api-settings-btn-secondary" type="button">取消</button>
+            <button id="bookmarkSettingsSaveBtn" class="api-settings-btn-primary" type="button">保存</button>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div id="apiSettingsModal" class="api-settings-modal" hidden>
@@ -296,6 +384,7 @@
     <script src="./core/time-parse.js"></script>
     <script src="./core/tt-bridge.js"></script>
     <script src="./core/runtime-guard.js"></script>
+    <script src="./browser/browser-shell.js"></script>
     <script src="./templates/templates.js"></script>
     <script src="./sla/sla.js"></script>
     <script src="./tickets/tickets.js"></script>

@@ -54,6 +54,9 @@
   let ttDomSyncTimer = null;
   /** @type {TicketItem[]} */
   let pendingDomSyncRows = [];
+  /** 延迟同步在「刷新进行中」时的重试次数，防止无限挂起 */
+  let deferredSyncRetryCount = 0;
+  const DEFERRED_SYNC_RETRY_MAX = 8;
 
   let deps = {
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
@@ -921,7 +924,7 @@ function buildExtractTicketsScript() {
   `;
 }
 
-async function refreshTickets({ reset = false, apiOnly = false } = {}) {
+async function refreshTickets({ reset = false, apiOnly = false, skipAutoReload = false } = {}) {
   const apiPrimary = await isApiPrimaryMode();
   if (apiOnly && !apiPrimary) return;
   if (!apiPrimary && !apiOnly && (!deps.getWebviewReady() || !deps.getTtWebview())) return;
@@ -1267,8 +1270,8 @@ async function refreshTickets({ reset = false, apiOnly = false } = {}) {
     if (tickets.length <= 8) {
       log(`已加载 ${tickets.length} 条工单。`, "muted");
     }
-    if (apiPrimary && usedApi) {
-      await maybeAutoReloadTtWebviewAfterApiSync(tickets, { reset });
+    if (apiPrimary && usedApi && !skipAutoReload) {
+      await maybeAutoReloadTtWebviewAfterApiSync(tickets, { reset, apiOnly });
     }
 
     renderTicketList();
@@ -1278,11 +1281,14 @@ async function refreshTickets({ reset = false, apiOnly = false } = {}) {
     if (deps.getAutoPriorityBoostEnabled()) {
       deps.requestAutoPriorityBoostFromRefresh();
     }
-    if (!ttReloadRequestedThisRefresh && !isTtDomSyncPending()) {
+    if (!skipAutoReload && !ttReloadRequestedThisRefresh && !isTtDomSyncPending()) {
       deps.requestTitleOnNewAfterRefresh();
     }
-    deps.requestHfIssueAfterRefresh();
-    deps.requestBurstOutbreakAfterRefresh();
+    // apiOnly 轮询不触发重扫描；完整刷新才驱动 HF / 短时批量（其内部另有节流）
+    if (!apiOnly) {
+      deps.requestHfIssueAfterRefresh();
+      deps.requestBurstOutbreakAfterRefresh();
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log(`工单列表刷新失败，请稍后重试。`, "warning");
@@ -1728,12 +1734,24 @@ function scheduleDeferredTtDomSync(reason, targets) {
 async function flushDeferredTtDomSync(reason) {
   if (!pendingDomSyncRows.length || !deps.getTtWebview?.()) return;
   if (deps.isTtWebviewReloadInFlight?.()) {
+    deferredSyncRetryCount += 1;
+    if (deferredSyncRetryCount > DEFERRED_SYNC_RETRY_MAX) {
+      pendingDomSyncRows = [];
+      deferredSyncRetryCount = 0;
+      if (ttDomSyncTimer) {
+        clearTimeout(ttDomSyncTimer);
+        ttDomSyncTimer = null;
+      }
+      log("页面同步等待超时，已停止自动刷新（可手动刷新）。", "warning");
+      return;
+    }
     ttDomSyncTimer = setTimeout(() => {
       void flushDeferredTtDomSync(reason);
     }, 2000);
     return;
   }
 
+  deferredSyncRetryCount = 0;
   const targets = pendingDomSyncRows.slice();
   const reloaded = !!deps.requestTtWebviewReload?.(reason);
   if (reloaded) {
@@ -1741,7 +1759,9 @@ async function flushDeferredTtDomSync(reason) {
     ttReloadRequestedThisRefresh = true;
     commitApiTicketIdBaseline(targets);
   } else {
-    log("页面刷新排队中，请稍候…", "muted");
+    // 冷却/熔断拒绝时清空排队，避免下一轮又叠一层
+    pendingDomSyncRows = [];
+    log("页面刷新暂缓（冷却中），稍后再同步。", "muted");
   }
 }
 
@@ -1758,8 +1778,9 @@ function isTtDomSyncPending() {
 
 /**
  * API 检测到来单：不立刻 F5，排队等程序自动刷新后再改标题/接单。
+ * apiOnly 轮询只处理「真正的新单」，不因列表容器短暂缺失而连环 F5。
  */
-async function maybeAutoReloadTtWebviewAfterApiSync(mapped, { reset = false } = {}) {
+async function maybeAutoReloadTtWebviewAfterApiSync(mapped, { reset = false, apiOnly = false } = {}) {
   if (!deps.getTtWebview?.()) return;
   if (deps.isTtWebviewReloadInFlight?.()) return;
 
@@ -1792,10 +1813,19 @@ async function maybeAutoReloadTtWebviewAfterApiSync(mapped, { reset = false } = 
     return;
   }
 
+  // 后台 API 轮询：只更新列表数据，不做 DOM 滞后 / 无列表容器的自动 F5
+  if (apiOnly) {
+    commitApiTicketIdBaseline(rows);
+    return;
+  }
+
   if (!reset) {
     const domSnap = await collectDomTicketIdsQuick();
     if (!domSnap.hasListWrapper) {
-      scheduleDeferredTtDomSync("no_list_wrapper", getMyPendingTicketsForTitleOnNew(rows));
+      const minePending = getMyPendingTicketsForTitleOnNew(rows);
+      if (minePending.length > 0) {
+        scheduleDeferredTtDomSync("no_list_wrapper", minePending);
+      }
       return;
     }
     const pendingHint = deps.getPendingCount?.();

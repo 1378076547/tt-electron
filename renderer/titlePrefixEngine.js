@@ -627,9 +627,14 @@
     cityMatchers = buildCityMatchersFromJson(chinaJson);
   }
 
+  function clearMatchers() {
+    cityMatchers = null;
+  }
+
   global.TTTitlePrefix = {
     buildCityMatchersFromJson,
     prepareMatchers,
+    clearMatchers,
     computeExpectedTitle,
     isEnglishDominantTitle
   };

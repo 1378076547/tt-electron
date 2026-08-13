@@ -712,8 +712,9 @@ async function waitForWebviewReadyForTitle(maxWaitMs = 20000) {
   return !!(deps.getWebviewReady() && deps.getTtWebview());
 }
 
-/** 列表没有目标单时强制刷 TT，打破「改标题等列表 / F5 被改标题挡住」死锁 */
+/** 列表没有目标单时强制刷 TT；已在刷新中则不再叠请求 */
 function forceTtSyncForMissingTitleTicket() {
+  if (deps.isTtWebviewReloadInFlight?.()) return false;
   return !!deps.requestTtWebviewReload?.("api_new_ticket");
 }
 
@@ -878,6 +879,11 @@ async function runNewTicketTitleNormalize(opts = {}) {
 
   setActiveLeftTab("logs");
   log(`发现 ${newOnes.length} 条新工单，正在检测标题…`, "info");
+  try {
+    window.TTDesktop?.browser?.ensureOpsSurface?.();
+  } catch {
+    // ignore
+  }
 
   const processed = [];
   let appliedCount = 0;
@@ -935,26 +941,28 @@ async function runNewTicketTitleNormalize(opts = {}) {
       forceTtSyncForMissingTitleTicket();
     }
 
+    const refreshOpts = { reset: false, skipAutoReload: !!opts.skipPageReload };
+
     if (!appliedCount && !processed.length) {
       if (deferredDomCount > 0) {
         log(`${deferredDomCount} 条新工单等待列表就绪，将自动重试。`, "info");
       } else {
         log("标题检测完成，无需修改。", "success");
       }
-      await refreshTickets({ reset: false });
+      await refreshTickets(refreshOpts);
       result = { applied: appliedCount, deferred: deferredDomCount, pendingNew: deferredDomCount };
       return result;
     }
 
     if (!appliedCount) {
       log("标题检测完成，无需修改。", "success");
-      await refreshTickets({ reset: false });
+      await refreshTickets(refreshOpts);
       result = { applied: 0, deferred: deferredDomCount, pendingNew: deferredDomCount };
       return result;
     }
 
     log(`已修改 ${appliedCount} 条工单标题。`, "success");
-    await refreshTickets({ reset: false });
+    await refreshTickets(refreshOpts);
     result = { applied: appliedCount, deferred: deferredDomCount, pendingNew: 0 };
     return result;
   } catch (err) {
@@ -962,7 +970,7 @@ async function runNewTicketTitleNormalize(opts = {}) {
     log("标题修改中断，请稍后重试。", "error");
     notifyTitleNormalizeIssue(null, `${tag}：中断`, msg);
     try {
-      await refreshTickets({ reset: false });
+      await refreshTickets({ reset: false, skipAutoReload: !!opts.skipPageReload });
     } catch {
       // ignore
     }
@@ -971,7 +979,8 @@ async function runNewTicketTitleNormalize(opts = {}) {
     titleNormalizeInProgress = false;
     syncTitleOnNewButtonState();
     if (D.ticketTitleNormalizeBtn) D.ticketTitleNormalizeBtn.disabled = deps.getRunning();
-    if (result.applied > 0 && deps.getRunning?.()) {
+    // 跳过/无需修改时也要继续接单，否则会卡在「开始处理」前
+    if (deps.getRunning?.() && (result.applied > 0 || deps.getBatchInProgress?.())) {
       queueMicrotask(() => {
         deps.requestAcceptAfterTitle?.();
       });
@@ -1007,7 +1016,10 @@ async function ensureNewTicketTitlesBeforeAccept(opts = {}) {
     newOnes = detectNewTicketsForTitle(getTickets());
   }
   if (!newOnes.length) return true;
-  const res = await runNewTicketTitleNormalize({ triggeredBy: "来单改标题-接单前" });
+  const res = await runNewTicketTitleNormalize({
+    triggeredBy: "来单改标题-接单前",
+    skipPageReload: true
+  });
   if (res.deferred > 0 || (res.pendingNew > 0 && res.applied === 0)) {
     titleOnNewQueued = true;
     forceTtSyncForMissingTitleTicket();
@@ -1019,6 +1031,7 @@ async function ensureNewTicketTitlesBeforeAccept(opts = {}) {
 /** 列表刷新后发现新单时自动改标题（仅开改标题，或与接单并行时的提前路径） */
 function requestTitleOnNewAfterRefresh() {
   if (!deps.getTitleOnNewAutoEnabled()) return;
+  if (deps.getBatchInProgress?.()) return;
   if (titleNormalizeInProgress) {
     titleOnNewQueued = true;
     return;
@@ -1272,6 +1285,14 @@ async function runTicketTitleNormalizeBatch() {
     getBaselineCount: () => knownTicketKeysForTitle.size,
     clearQueue: () => {
       titleOnNewQueued = false;
+    },
+    clearMemoryCaches: () => {
+      chinaCitiesJsonCache = null;
+      knownTicketKeysForTitle = new Set();
+      titleOnNewQueued = false;
+      try {
+        window.TTTitlePrefix?.clearMatchers?.();
+      } catch (_) {}
     },
     clearTitleOnNewBaseline,
     resetTitleNewTicketBaseline,

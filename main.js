@@ -60,9 +60,25 @@ function createAppMenu() {
           }
         },
         {
+          label: "书签设置…",
+          click: () => {
+            if (!mainWindow) return;
+            mainWindow.show();
+            mainWindow.focus();
+            mainWindow.webContents.send("open-bookmark-settings");
+          }
+        },
+        {
           label: "打开 API 配置文件",
           click: () => {
             openApiConfigFile().catch(() => {});
+          }
+        },
+        { type: "separator" },
+        {
+          label: "清理缓存…",
+          click: () => {
+            clearAppCachesWithConfirm().catch(() => {});
           }
         },
         { type: "separator" },
@@ -644,19 +660,6 @@ ipcMain.on("log-to-file", (_event, payload) => {
   appendDailyLog(String(message));
 });
 
-ipcMain.handle("open-logs-dir", async () => {
-  const { dir } = getLogFilePath();
-  try {
-    fs.mkdirSync(dir, { recursive: true });
-  } catch {}
-  try {
-    // openPath 在 Windows 上会用资源管理器打开目录
-    return await shell.openPath(dir);
-  } catch (err) {
-    return err instanceof Error ? err.message : String(err);
-  }
-});
-
 ipcMain.handle("restart-app", async () => {
   try {
     restartAppNow();
@@ -836,6 +839,372 @@ ipcMain.handle("select-and-read-pm-csv", async () => {
     return { ok: true, path: filePath, content };
   } catch (err) {
     return { ok: false, message: err instanceof Error ? err.message : String(err) };
+  }
+});
+
+const PM_CSV_REMOTE_URL =
+  "https://s3plus.sankuai.com/static-bucket/4000%20Agent%20Tools/Synchronize/PM.csv";
+const PM_CSV_FILENAME = "PM.csv";
+
+function getPmCsvPreferredPaths() {
+  const names = [PM_CSV_FILENAME];
+  /** @type {string[]} */
+  const dirs = [];
+  try {
+    if (app.isPackaged) {
+      dirs.push(path.dirname(process.execPath));
+    } else {
+      dirs.push(__dirname);
+    }
+  } catch (_) {}
+  try {
+    dirs.push(app.getPath("userData"));
+  } catch (_) {}
+  const out = [];
+  for (const dir of dirs) {
+    if (!dir) continue;
+    for (const name of names) {
+      out.push(path.join(dir, name));
+    }
+  }
+  return out;
+}
+
+function looksLikePmCsv(content) {
+  const first = String(content || "")
+    .replace(/^\uFEFF/, "")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .find(Boolean);
+  if (!first) return false;
+  const header = first.toLowerCase();
+  if (!header.includes("region_key")) return false;
+  // 旧：members_mis；新一人一行：member_mis / mis
+  return (
+    header.includes("members_mis") ||
+    header.includes("member_mis") ||
+    /(^|,)\s*mis\s*(,|$)/.test(header)
+  );
+}
+
+function downloadTextUrl(url) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const client = u.protocol === "http:" ? http : https;
+    const req = client.request(
+      {
+        protocol: u.protocol,
+        hostname: u.hostname,
+        port: u.port || (u.protocol === "http:" ? 80 : 443),
+        path: `${u.pathname}${u.search || ""}`,
+        method: "GET",
+        headers: {
+          Accept: "text/csv,text/plain,*/*",
+          "User-Agent": "TTDesktop1.0-PM-Sync"
+        },
+        timeout: 30000
+      },
+      (res) => {
+        const code = Number(res.statusCode || 0);
+        if (code >= 300 && code < 400 && res.headers.location) {
+          res.resume();
+          downloadTextUrl(res.headers.location).then(resolve, reject);
+          return;
+        }
+        const chunks = [];
+        res.on("data", (c) => chunks.push(c));
+        res.on("end", () => {
+          const buf = Buffer.concat(chunks);
+          const text = buf.toString("utf8");
+          if (code < 200 || code >= 300) {
+            reject(new Error(`HTTP ${code}: ${text.slice(0, 160)}`));
+            return;
+          }
+          resolve(text);
+        });
+      }
+    );
+    req.on("timeout", () => {
+      req.destroy(new Error("下载超时"));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+/**
+ * 从 S3Plus 拉取 PM.csv，写入程序目录（安装目录旁；写失败则落到 userData）
+ */
+async function syncPmCsvFromRemote() {
+  const content = await downloadTextUrl(PM_CSV_REMOTE_URL);
+  if (!looksLikePmCsv(content)) {
+    return {
+      ok: false,
+      message:
+        "远程 PM.csv 格式不正确（需含 region_key，以及 members_mis 或 member_mis）"
+    };
+  }
+  const candidates = getPmCsvPreferredPaths();
+  let lastErr = "";
+  for (const target of candidates) {
+    try {
+      await fs.promises.mkdir(path.dirname(target), { recursive: true });
+      await fs.promises.writeFile(target, content, "utf8");
+      return {
+        ok: true,
+        path: target,
+        content,
+        url: PM_CSV_REMOTE_URL,
+        bytes: Buffer.byteLength(content, "utf8")
+      };
+    } catch (err) {
+      lastErr = err instanceof Error ? err.message : String(err);
+    }
+  }
+  return { ok: false, message: lastErr || "无法写入本地 PM.csv" };
+}
+
+ipcMain.handle("sync-pm-csv-from-s3", async () => {
+  try {
+    return await syncPmCsvFromRemote();
+  } catch (err) {
+    return { ok: false, message: err instanceof Error ? err.message : String(err) };
+  }
+});
+
+ipcMain.handle("get-pm-csv-status", async () => {
+  const candidates = getPmCsvPreferredPaths();
+  for (const p of candidates) {
+    try {
+      if (!fs.existsSync(p)) continue;
+      const content = await fs.promises.readFile(p, "utf8");
+      if (!looksLikePmCsv(content)) continue;
+      const st = await fs.promises.stat(p);
+      return { ok: true, path: p, mtimeMs: st.mtimeMs, bytes: st.size };
+    } catch (_) {}
+  }
+  return { ok: false, path: "", message: "本地尚无 PM.csv" };
+});
+
+function pushCacheItem(items, name, status, detail) {
+  items.push({
+    name: String(name || ""),
+    status: status === "ok" || status === "skip" || status === "fail" ? status : "fail",
+    detail: String(detail || "").trim()
+  });
+}
+
+function isPathBusyError(err) {
+  const code = String(err?.code || "").toUpperCase();
+  if (code === "EPERM" || code === "EBUSY" || code === "EACCES") return true;
+  const msg = String(err instanceof Error ? err.message : err || "").toLowerCase();
+  return (
+    msg.includes("eperm") ||
+    msg.includes("ebusy") ||
+    msg.includes("operation not permitted") ||
+    msg.includes("resource busy") ||
+    msg.includes("being used by another process")
+  );
+}
+
+function safeRmPath(targetPath) {
+  try {
+    if (!targetPath || !fs.existsSync(targetPath)) {
+      return { ok: false, skipped: true, busy: false, detail: "不存在" };
+    }
+    const st = fs.statSync(targetPath);
+    fs.rmSync(targetPath, { recursive: true, force: true });
+    return {
+      ok: true,
+      skipped: false,
+      busy: false,
+      detail: st.isDirectory() ? `已删除目录 ${targetPath}` : `已删除文件 ${targetPath}`
+    };
+  } catch (err) {
+    if (isPathBusyError(err)) {
+      return {
+        ok: false,
+        skipped: true,
+        busy: true,
+        detail: `跳过（程序运行中无法删除）：${targetPath}`
+      };
+    }
+    return {
+      ok: false,
+      skipped: false,
+      busy: false,
+      detail: err instanceof Error ? err.message : String(err)
+    };
+  }
+}
+
+function statusFromRmResult(r) {
+  if (r?.ok) return "ok";
+  if (r?.busy || r?.skipped) return "skip";
+  return "fail";
+}
+
+function listUpdaterCacheDirs() {
+  const out = [];
+  const push = (p) => {
+    const s = String(p || "").trim();
+    if (s && !out.includes(s)) out.push(s);
+  };
+  try {
+    push(path.join(app.getPath("userData"), "..", "ttdesktop-electron-updater"));
+  } catch (_) {}
+  try {
+    if (process.env.LOCALAPPDATA) {
+      push(path.join(process.env.LOCALAPPDATA, "ttdesktop-electron-updater"));
+    }
+  } catch (_) {}
+  try {
+    push(path.join(app.getPath("temp"), "ttdesktop-electron-updater"));
+  } catch (_) {}
+  return out;
+}
+
+/**
+ * 清理运行缓存（不清 API 配置 / 界面设置 / TT 登录 Cookie）
+ * @returns {Promise<{ ok: boolean, items: Array<{name:string,status:string,detail:string}> }>}
+ */
+async function clearAppCaches() {
+  /** @type {Array<{name:string,status:string,detail:string}>} */
+  const items = [];
+
+  // 1) 主窗口 HTTP 缓存
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      await mainWindow.webContents.session.clearCache();
+      pushCacheItem(items, "主窗口 HTTP 缓存", "ok", "session.clearCache() 完成");
+    } else {
+      await session.defaultSession.clearCache();
+      pushCacheItem(items, "主窗口 HTTP 缓存", "ok", "defaultSession.clearCache() 完成");
+    }
+  } catch (err) {
+    pushCacheItem(
+      items,
+      "主窗口 HTTP 缓存",
+      "fail",
+      err instanceof Error ? err.message : String(err)
+    );
+  }
+
+  // 2) 内置 TT 浏览器 HTTP 缓存（保留 Cookie/登录）
+  try {
+    const guest = session.fromPartition(TT_GUEST_PARTITION);
+    await guest.clearCache();
+    try {
+      await guest.clearStorageData({
+        storages: ["appcache", "shadercache", "cachestorage", "serviceworkers"]
+      });
+    } catch (_) {}
+    pushCacheItem(
+      items,
+      "内置 TT 浏览器 HTTP 缓存",
+      "ok",
+      `partition=${TT_GUEST_PARTITION}（已保留登录 Cookie）`
+    );
+  } catch (err) {
+    pushCacheItem(
+      items,
+      "内置 TT 浏览器 HTTP 缓存",
+      "fail",
+      err instanceof Error ? err.message : String(err)
+    );
+  }
+
+  // 3) PM 表本地文件缓存
+  const pmPaths = getPmCsvPreferredPaths();
+  let pmHit = false;
+  for (const p of pmPaths) {
+    const r = safeRmPath(p);
+    if (r.skipped && !r.busy) continue;
+    pmHit = true;
+    pushCacheItem(items, "PM 表本地缓存", statusFromRmResult(r), r.detail);
+  }
+  if (!pmHit) {
+    pushCacheItem(items, "PM 表本地缓存", "skip", "未找到本地 PM.csv");
+  }
+
+  // 4) 自动更新下载缓存
+  let updaterHit = false;
+  for (const dir of listUpdaterCacheDirs()) {
+    const r = safeRmPath(dir);
+    if (r.skipped && !r.busy) continue;
+    updaterHit = true;
+    pushCacheItem(items, "自动更新下载缓存", statusFromRmResult(r), r.detail);
+  }
+  if (!updaterHit) {
+    pushCacheItem(items, "自动更新下载缓存", "skip", "未找到 updater 缓存目录");
+  }
+
+  // 5) Chromium Code/GPU Cache 目录（userData 下常见缓存）
+  const userDataCaches = [];
+  try {
+    userDataCaches.push(path.join(app.getPath("userData"), "Cache"));
+    userDataCaches.push(path.join(app.getPath("userData"), "Code Cache"));
+    userDataCaches.push(path.join(app.getPath("userData"), "GPUCache"));
+  } catch (_) {}
+  let diskCacheHit = false;
+  for (const dir of userDataCaches) {
+    const r = safeRmPath(dir);
+    if (r.skipped && !r.busy) continue;
+    diskCacheHit = true;
+    pushCacheItem(items, "程序磁盘缓存目录", statusFromRmResult(r), r.detail);
+  }
+  if (!diskCacheHit) {
+    pushCacheItem(items, "程序磁盘缓存目录", "skip", "userData 下无 Cache/Code Cache/GPUCache");
+  }
+
+  const failed = items.some((x) => x.status === "fail");
+  return { ok: !failed, items };
+}
+
+async function clearAppCachesWithConfirm() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const { response } = await dialog.showMessageBox(mainWindow, {
+    type: "question",
+    title: "清理缓存",
+    message: "确定清理程序运行缓存吗？",
+    detail:
+      "将清理：\n" +
+      "· 主窗口 / 内置 TT 的 HTTP 缓存\n" +
+      "· 本地 PM.csv 缓存（随后可重新同步）\n" +
+      "· 自动更新下载缓存\n" +
+      "· 程序磁盘缓存目录\n" +
+      "· 内存中的城市库/扫描状态（由界面侧清理）\n\n" +
+      "不会清理：\n" +
+      "· API 配置（令牌/MIS/工单组）\n" +
+      "· 界面设置与话术模板\n" +
+      "· TT 登录 Cookie（一般不用重新登录）",
+    buttons: ["清理缓存", "取消"],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true
+  });
+  if (response !== 0) return;
+
+  const result = await clearAppCaches();
+  try {
+    mainWindow.webContents.send("app-cache-cleared", result);
+  } catch (_) {}
+}
+
+ipcMain.handle("clear-app-caches", async () => {
+  try {
+    return await clearAppCaches();
+  } catch (err) {
+    return {
+      ok: false,
+      items: [
+        {
+          name: "清理缓存",
+          status: "fail",
+          detail: err instanceof Error ? err.message : String(err)
+        }
+      ]
+    };
   }
 });
 

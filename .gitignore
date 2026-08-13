@@ -8,6 +8,15 @@ dist-portable/
 
 # 个人 API 配置（含 authorization token，绝对不能提交）
 tt-api.local.json
+*.local.json
+!*.local.json.example
+
+# 本地 PM 表（含人员信息，不提交）
+PM.csv
+
+# 技能市场缓存 / 临时脚本
+.catpaw/
+prompt-refactor.js
 
 # 日志
 logs/
