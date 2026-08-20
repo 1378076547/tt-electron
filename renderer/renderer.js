@@ -1116,8 +1116,7 @@ async function runCheck() {
     log(statusToMessage(status), statusToLevel(status));
     return { status, pendingCount };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    log("操作失败，请稍后重试。", "error");
+    log(`接单操作失败：${TD.log.errText(err)}`, "error");
     return { status: "unknown", pendingCount: NaN };
   } finally {
     busy = false;
@@ -1447,7 +1446,7 @@ function requestTtWebviewReload(reason = "sync") {
   if (!executeTtWebviewReload()) {
     pendingRunAfterReload = false;
     markTtReloadFinished();
-    log("工单页面刷新失败，请稍后重试。", "error");
+    log(`工单页面刷新失败：未能执行刷新（原因 ${reason || "unknown"}）。`, "error");
     return false;
   }
   return true;
@@ -1680,8 +1679,7 @@ function bindEvents() {
   if (ticketPriorityApplyBtn) {
     ticketPriorityApplyBtn.addEventListener("click", () => {
       applyPriorityForActiveTicket().catch((err) => {
-        const msg = err instanceof Error ? err.message : String(err);
-        log("优先级设置异常，请稍后重试。", "error");
+        log(`优先级设置异常：${TD.log.errText(err)}`, "error");
       });
     });
   }
@@ -1740,15 +1738,15 @@ function bindEvents() {
       }
       if (ticketPrioritySelect) ticketPrioritySelect.value = AUTO_PRIORITY_BOOST_TARGET;
       log(`命中 ${count} 条工单，将升高至「高」优先级。`, "info");
-      applyPriorityBatch().catch(() => {
-        log("优先级设置异常，请稍后重试。", "error");
+      applyPriorityBatch().catch((err) => {
+        log(`优先级设置异常：${TD.log.errText(err)}`, "error");
       });
     });
   }
   if (ticketPriorityBatchBtn) {
     ticketPriorityBatchBtn.addEventListener("click", () => {
-      applyPriorityBatch().catch(() => {
-        log("优先级设置异常，请稍后重试。", "error");
+      applyPriorityBatch().catch((err) => {
+        log(`优先级设置异常：${TD.log.errText(err)}`, "error");
         setPriorityBatchUiBusy(false);
       });
     });
@@ -1763,8 +1761,7 @@ function bindEvents() {
     ticketTitleOnNewBtn.addEventListener("click", () => {
       setActiveLeftTab("logs");
       runNewTicketTitleNormalize({ triggeredBy: "来单改标题" }).catch((err) => {
-        const msg = err instanceof Error ? err.message : String(err);
-        log("标题修改异常，请稍后重试。", "error");
+        log(`标题修改异常：${TD.log.errText(err)}`, "error");
       });
     });
   }
@@ -1777,8 +1774,7 @@ function bindEvents() {
     ticketTitleNormalizeBtn.addEventListener("click", () => {
       setActiveLeftTab("logs");
       runTicketTitleNormalizeBatch().catch((err) => {
-        const msg = err instanceof Error ? err.message : String(err);
-        log("标题检测异常，请稍后重试。", "error");
+        log(`标题检测异常：${TD.log.errText(err)}`, "error");
       });
     });
   }
@@ -1790,8 +1786,7 @@ function bindEvents() {
   if (pmPullByRegionBtn) {
     pmPullByRegionBtn.addEventListener("click", () => {
       runPmPullByRegion().catch((err) => {
-        const msg = err instanceof Error ? err.message : String(err);
-        log("拉人异常，请稍后重试。", "error");
+        log(`拉人异常：${TD.log.errText(err)}`, "error");
         // pm module handles busy in finally
       });
     });

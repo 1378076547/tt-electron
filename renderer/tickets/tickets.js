@@ -1291,7 +1291,7 @@ async function refreshTickets({ reset = false, apiOnly = false, skipAutoReload =
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    log(`工单列表刷新失败，请稍后重试。`, "warning");
+    log(`工单列表刷新失败：${TD.log.errText(err)}`, "warning");
   } finally {
     ticketRefreshInFlight = false;
     if (deps.getTitlePatrolLogEnabled()) {
@@ -2323,9 +2323,10 @@ async function handleTicketClick(item, options = {}) {
     })();
   `;
 
+  const clickLabel = String(item.title || item.id || "").slice(0, 40);
   const res = await ttExecuteJavaScript(clickScript);
   if (!res?.ok) {
-    log("无法打开该工单，请稍后重试。", "warning");
+    log(`无法打开工单「${clickLabel}」：${TD.log.formatReason(res?.reason)}`, "warning");
     if (!skipRefresh) {
       if (await isApiPrimaryMode()) await syncActiveHighlightFromDom();
       else await refreshTickets({ reset: false });
@@ -2335,7 +2336,10 @@ async function handleTicketClick(item, options = {}) {
 
   const activeId = normalizeTicketId(res.activeId);
   if (!activeId || (clickTicketId && activeId !== clickTicketId)) {
-    log("无法打开该工单，请稍后重试。", "warning");
+    log(
+      `无法打开工单「${clickLabel}」：打开后详情编号不一致（期望 ${clickTicketId || "未知"}，实际 ${activeId || "空"}）`,
+      "warning"
+    );
     if (!skipRefresh) {
       if (await isApiPrimaryMode()) await syncActiveHighlightFromDom();
       else await refreshTickets({ reset: false });

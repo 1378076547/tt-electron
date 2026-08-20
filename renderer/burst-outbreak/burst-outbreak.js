@@ -432,7 +432,7 @@
       updateBurstOutbreakUi();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      log("短时批量故障检测异常，请稍后重试。", "warning");
+      log(`短时批量故障检测异常：${TD.log.errText(err)}`, "warning");
     } finally {
       scanInFlight = false;
     }

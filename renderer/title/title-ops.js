@@ -158,6 +158,23 @@ function buildTitleNormalizeInspectScript() {
           }
         }
 
+        // TT 改版：详情头 import-info / ticket-detail-header 内也可能挂架构
+        for (const root of roots) {
+          const extraRoots = [
+            root.querySelector('.import-info'),
+            root.querySelector('.import-info-header')?.parentElement,
+            root.querySelector('.ticket-detail-header'),
+            root
+          ].filter(Boolean);
+          for (const er of extraRoots) {
+            const infos = er.querySelectorAll('.org-info, .info-text, [class*="org-path"], [class*="orgPath"]');
+            for (const el of infos) {
+              const c = cleanPath(el.textContent || '');
+              if (looksLikeOrgPathOnly(c)) return c;
+            }
+          }
+        }
+
         // 第一个仅含架构的 .org-info（处理人区块常为「零售IT_4000」无 公司/）
         for (const root of roots) {
           const infos = root.querySelectorAll('.org-info');
@@ -213,6 +230,31 @@ function buildTitleNormalizeInspectScript() {
         return { englishCity, englishStore, englishIdName };
       }
 
+      function normalizeChineseCityLabel(label) {
+        return norm(label).replace(/^\\*+\\s*/, '').trim();
+      }
+
+      function isChineseCityFormLabel(label) {
+        const lab = normalizeChineseCityLabel(label);
+        return lab === '所在城市' || lab === '城市' || lab.includes('所在城市');
+      }
+
+      /** 中文工单自定义字段：所在城市（地级市，TT 新版必填） */
+      function getChineseCityValue() {
+        const container =
+          document.querySelector('.ticket-custom-edit-container') || document.querySelector('.editor-content form.mtd-form');
+        if (!container) return '';
+        const items = Array.from(container.querySelectorAll('.mtd-form-item'));
+        for (const item of items) {
+          const label = item.querySelector('.mtd-form-item-label')?.textContent || '';
+          if (!isChineseCityFormLabel(label)) continue;
+          const val = readCustomFieldInput(item);
+          if (!val || isPlaceholderCustomValue(val)) continue;
+          return val;
+        }
+        return '';
+      }
+
       function getWarehouseStoreValue() {
         const container =
           document.querySelector('.ticket-custom-edit-container') || document.querySelector('.editor-content form.mtd-form');
@@ -234,12 +276,36 @@ function buildTitleNormalizeInspectScript() {
           document.querySelector('#ticket-detail') ||
           document.querySelector('.ticket-detail-container') ||
           document.querySelector('.detail-with-list-container');
-        const fromDisplay = detailRoot?.querySelector('.ticket-name-text-display');
-        if (fromDisplay && norm(fromDisplay.textContent)) return norm(fromDisplay.textContent);
-        const ta = document.querySelector('.ticket-edit-title textarea');
-        if (ta && ta.value) return norm(ta.value);
-        const ipt = document.querySelector('.ticket-edit-title input.mtd-input');
-        if (ipt && ipt.value) return norm(ipt.value);
+        const titleSelectors = [
+          '.tt-hover-field .ticket-name-text-display',
+          '.ticket-detail-header .ticket-name-text-display',
+          '.ticket-edit-title .ticket-name-text-display',
+          '.ticket-name-text-display'
+        ];
+        for (const sel of titleSelectors) {
+          const node = detailRoot?.querySelector(sel) || document.querySelector(sel);
+          if (node && norm(node.textContent)) return norm(node.textContent);
+        }
+        const titleRoots = [
+          detailRoot?.querySelector('.ticket-edit-title'),
+          detailRoot?.querySelector('.ticket-detail-header'),
+          detailRoot?.querySelector('.tt-hover-field .ticket-name-text-display')?.closest('.tt-hover-field')
+        ].filter(Boolean);
+        const editorSelectors = [
+          'textarea.mtd-textarea',
+          'textarea',
+          'input.mtd-input',
+          'input[type="text"]',
+          '[contenteditable="true"]'
+        ];
+        for (const root of titleRoots) {
+          for (const sel of editorSelectors) {
+            const el = root.querySelector(sel);
+            if (!el || el.closest('.ticket-custom-edit-container')) continue;
+            if (el.value) return norm(el.value);
+            if (el.isContentEditable) return norm(el.textContent || '');
+          }
+        }
         return '';
       }
 
@@ -247,6 +313,7 @@ function buildTitleNormalizeInspectScript() {
       return {
         architectureRaw: getArchitecturePathText(),
         warehouseStore: getWarehouseStoreValue(),
+        chineseCity: getChineseCityValue(),
         currentTitle: getCurrentTitleFromDetail(),
         englishCity: englishCustom.englishCity,
         englishStore: englishCustom.englishStore,
@@ -297,27 +364,80 @@ function buildApplyTitleScript(newTitle) {
         el.dispatchEvent(new Event('change', { bubbles: true }));
       }
 
-      /** 只认标题栏内的控件，避免误改页面上其它 input */
-      function findTitleEditorStrict(detail) {
-        const roots = [document, detail].filter(Boolean);
+      function setContentEditableValue(el, val) {
+        if (!el || !el.isContentEditable) return;
+        el.textContent = val;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+
+      function isInsideCustomFields(el) {
+        return !!(el && el.closest && el.closest('.ticket-custom-edit-container, .editor-content form.mtd-form'));
+      }
+
+      function isTitleFieldRoot(el) {
+        if (!el || !el.closest || isInsideCustomFields(el)) return false;
+        // 状态2：点击后 editor 在 .ticket-edit-title 内
+        if (el.closest('.ticket-edit-title')) return true;
+        if (el.closest('.ticket-detail-header')) return true;
+        const hover = el.closest('.tt-hover-field');
+        if (!hover || isInsideCustomFields(hover)) return false;
+        // 状态1：展示态 hover 内有 .ticket-name-text-display
+        if (hover.querySelector('.ticket-name-text-display')) return true;
+        // 编辑态 hover 已不含 display，但父级为 ticket-edit-title
+        return !!hover.closest('.ticket-edit-title');
+      }
+
+      function findTitleDisplayNode(detail) {
+        const d = detail || document;
         const selectors = [
-          '.ticket-edit-title textarea.mtd-textarea',
-          '.ticket-edit-title .tt-hover-field textarea.mtd-textarea',
-          '.ticket-edit-title textarea',
-          '.ticket-edit-title .tt-hover-field textarea',
-          '.ticket-edit-title input.mtd-input',
-          '.ticket-edit-title input[type="text"]'
+          '.ticket-detail-header .tt-hover-field .ticket-name-text-display',
+          '.tt-hover-field .ticket-name-text-display',
+          '.ticket-detail-header .ticket-name-text-display',
+          '.ticket-name-text-display'
         ];
-        for (const r of roots) {
-          for (const sel of selectors) {
-            const el = r.querySelector(sel);
-            if (el && (visible(el) || el.offsetParent !== null)) return el;
-          }
+        for (const sel of selectors) {
+          const node = d.querySelector(sel);
+          if (node && !isInsideCustomFields(node) && visible(node) && norm(node.textContent || '')) return node;
         }
-        for (const r of roots) {
+        return null;
+      }
+
+      function findTitleFieldRoots(detail) {
+        const d = detail || document;
+        const roots = [];
+        const add = (el) => {
+          if (!el || isInsideCustomFields(el) || roots.includes(el)) return;
+          roots.push(el);
+        };
+        // 状态2：编辑态优先认 .ticket-edit-title
+        add(d.querySelector('.ticket-edit-title'));
+        const display = findTitleDisplayNode(d);
+        if (display) {
+          add(display.closest('.tt-hover-field'));
+          add(display.closest('.ticket-detail-header'));
+        }
+        add(d.querySelector('.ticket-detail-header'));
+        return roots;
+      }
+
+      /** 只认标题栏内的控件，避免误改自定义字段 input */
+      function findTitleEditorStrict(detail) {
+        const d = detail || document;
+        // 状态2：.ticket-edit-title > .tt-hover-field > textarea.mtd-textarea
+        const editTa =
+          d.querySelector('.ticket-edit-title textarea.mtd-textarea') ||
+          d.querySelector('.ticket-edit-title textarea');
+        if (editTa && !isInsideCustomFields(editTa) && (visible(editTa) || editTa.offsetParent !== null)) {
+          return editTa;
+        }
+        const selectors = ['textarea.mtd-textarea', 'textarea', 'input.mtd-input', 'input[type="text"]'];
+        const roots = findTitleFieldRoots(detail);
+        for (const root of roots) {
           for (const sel of selectors) {
-            const el = r.querySelector(sel);
-            if (el) return el;
+            const el = root.querySelector(sel);
+            if (!el || isInsideCustomFields(el)) continue;
+            if (visible(el) || el.offsetParent !== null) return el;
           }
         }
         return null;
@@ -326,17 +446,50 @@ function buildApplyTitleScript(newTitle) {
       function readDisplayedTitle(detail) {
         const d = detail || document;
         const selectors = [
-          '.ticket-edit-title .ticket-name-text-display',
+          '.tt-hover-field .ticket-name-text-display',
           '.ticket-detail-header .ticket-name-text-display',
           '.ticket-name-text-display'
         ];
         for (const sel of selectors) {
           const n = d.querySelector(sel);
-          if (n && norm(n.textContent)) return norm(n.textContent);
+          if (n && !isInsideCustomFields(n) && norm(n.textContent)) return norm(n.textContent);
         }
         const editor = findTitleEditorStrict(detail);
         if (editor && editor.value) return norm(editor.value);
         return '';
+      }
+
+      function findTitleCommitRoot(detail) {
+        return (
+          detail?.querySelector('.ticket-edit-title') ||
+          findTitleFieldRoots(detail)[0] ||
+          detail?.querySelector('.ticket-detail-header') ||
+          null
+        );
+      }
+
+      async function openTitleEditor(detail) {
+        if (findTitleEditorStrict(detail)) return true;
+
+        const display = findTitleDisplayNode(detail);
+        if (!display) return false;
+
+        // 状态1：点击 .ticket-name-text-display 进入编辑
+        display.scrollIntoView({ block: 'center', behavior: 'instant' });
+        await sleep(80);
+        display.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+        display.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+        display.click();
+        await sleep(350);
+
+        if (!findTitleEditorStrict(detail)) {
+          const field = display.closest('.tt-hover-field');
+          if (field) {
+            field.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+            await sleep(250);
+          }
+        }
+        return !!findTitleEditorStrict(detail);
       }
 
       async function commitTitleEdit(editor, detail) {
@@ -352,7 +505,7 @@ function buildApplyTitleScript(newTitle) {
         editor.blur();
         await sleep(200);
 
-        const titleRoot = detail?.querySelector('.ticket-edit-title') || document.querySelector('.ticket-edit-title');
+        const titleRoot = findTitleCommitRoot(detail);
         if (titleRoot) {
           const confirmBtn = titleRoot.querySelector(
             '.mtdicon-check, .mtdicon-success-o, [class*="confirm"], button.mtd-btn-primary, button.mtd-btn'
@@ -383,31 +536,17 @@ function buildApplyTitleScript(newTitle) {
       const beforeTitle = readDisplayedTitle(detail);
       if (beforeTitle === norm(newTitle)) return { ok: true, reason: 'already_set' };
 
-      const display =
-        detail.querySelector('.ticket-edit-title .ticket-name-text-display') ||
-        detail.querySelector('.ticket-name-text-display');
+      await openTitleEditor(detail);
 
-      let editor = findTitleEditorStrict(detail);
-      if (!editor && display && visible(display)) {
-        display.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
-        display.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
-        display.click();
-        await sleep(300);
-      } else if (!editor && display) {
-        const field = display.closest('.tt-hover-field');
-        if (field) {
-          field.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-          await sleep(300);
-        }
-      }
-
+      let editor = null;
       for (let i = 0; i < 28 && !editor; i += 1) {
         editor = findTitleEditorStrict(detail);
         if (!editor) {
           const ae = document.activeElement;
-          if (ae && ae.closest && ae.closest('.ticket-edit-title') && (ae.tagName === 'TEXTAREA' || ae.tagName === 'INPUT')) editor = ae;
+          if (ae && isTitleFieldRoot(ae) && (ae.tagName === 'TEXTAREA' || ae.tagName === 'INPUT')) editor = ae;
         }
         if (editor) break;
+        if (i === 5 || i === 12) await openTitleEditor(detail);
         await sleep(200);
       }
 
@@ -447,7 +586,15 @@ async function ensureChinaCitiesLoaded() {
 function formatTitleStationSourceHint(res) {
   if (!res) return "";
   const langHint = res.titleLang === "en" ? "\n  类型：英文标题（城市+编号+站点前缀）" : "";
-  if (res.locationSource === "custom") return `${langHint}\n  前缀来源：自定义字段 City/Store`;
+  const cityHint =
+    res.citySource === "custom"
+      ? "\n  城市来源：自定义字段「所在城市」"
+      : res.citySource === "arch_service"
+        ? "\n  城市来源：架构「XX服务站」段"
+        : res.citySource === "arch"
+          ? "\n  城市来源：发起人架构路径"
+          : "";
+  if (res.locationSource === "custom") return `${langHint}${cityHint}\n  前缀来源：自定义字段 City/Store`;
   if (res.locationSource === "arch") return `${langHint}\n  前缀来源：发起人架构末级`;
   if (res.stationCombineNote) return `${langHint}\n  站/仓/店：${String(res.stationCombineNote).slice(0, 80)}`;
   if (res.stationSource === "warehouse+arch") {
@@ -456,9 +603,9 @@ function formatTitleStationSourceHint(res) {
   if (res.archLocSeg && res.stationSource === "arch") {
     return `${langHint}\n  站/仓/店：架构「${String(res.archLocSeg).slice(0, 36)}」`;
   }
-  if (res.stationSource === "warehouse") return `${langHint}\n  站/仓/店：仓库/门店字段`;
-  if (res.stationSource === "path") return `${langHint}\n  站/仓/店：架构末级`;
-  return langHint;
+  if (res.stationSource === "warehouse") return `${langHint}${cityHint}\n  站/仓/店：仓库/门店字段`;
+  if (res.stationSource === "path") return `${langHint}${cityHint}\n  站/仓/店：架构末级`;
+  return `${langHint}${cityHint}`;
 }
 
 function ticketKeyForTitle(item) {
@@ -549,6 +696,37 @@ function parseWarehouseFromDesc(desc) {
   return m ? String(m[1] || "").trim() : "";
 }
 
+function parseChineseCityFromDesc(desc) {
+  const text = normalizeDescToText(desc);
+  if (!text) return "";
+  const m =
+    text.match(/所在城市\s*[:：]\s*([^\n]+)/) ||
+    text.match(/(?:^|\n)\s*城市\s*[:：]\s*([^\n]+)/);
+  return m ? String(m[1] || "").trim() : "";
+}
+
+function isChineseCityApiLabel(label) {
+  const lab = String(label || "")
+    .trim()
+    .replace(/^\*+\s*/, "");
+  return lab === "所在城市" || lab === "城市" || lab.includes("所在城市");
+}
+
+function pickChineseCityFromApiPayload(t) {
+  let chineseCity = "";
+  const lists = [t?.customFields, t?.customFieldList, t?.formFields, t?.fields].filter(Array.isArray);
+  for (const list of lists) {
+    for (const row of list) {
+      const label = String(row?.label || row?.name || row?.fieldName || row?.key || "").trim();
+      const val = String(row?.value || row?.fieldValue || row?.content || "").trim();
+      if (!label || !val) continue;
+      if (isChineseCityApiLabel(label)) chineseCity = val;
+    }
+  }
+  if (!chineseCity) chineseCity = parseChineseCityFromDesc(t?.desc || t?.description || "");
+  return chineseCity;
+}
+
 function parseEnglishCustomFromDesc(desc) {
   const text = normalizeDescToText(desc);
   if (!text) return { englishCity: "", englishStore: "", englishIdName: "" };
@@ -587,9 +765,10 @@ function buildInspectFromApiTicket(ticketData) {
   const t = ticketData || {};
   const architectureRaw = String(t.org || t.reporterOrg || "").trim();
   const warehouseStore = parseWarehouseFromDesc(t.desc || t.description || "");
+  const chineseCity = pickChineseCityFromApiPayload(t);
   const currentTitle = String(t.name || t.title || t.ticketName || "").trim();
   const englishCustom = pickEnglishCustomFromApiPayload(t);
-  return { architectureRaw, warehouseStore, currentTitle, ...englishCustom };
+  return { architectureRaw, warehouseStore, chineseCity, currentTitle, ...englishCustom };
 }
 
 function mergeInspectPreferApi(domInspect, apiInspect) {
@@ -599,6 +778,7 @@ function mergeInspectPreferApi(domInspect, apiInspect) {
   return {
     architectureRaw: String(d.architectureRaw || a.architectureRaw || "").trim(),
     warehouseStore: String(a.warehouseStore || d.warehouseStore || "").trim(),
+    chineseCity: pickCustom("chineseCity"),
     currentTitle: String(a.currentTitle || d.currentTitle || "").trim(),
     englishCity: pickCustom("englishCity"),
     englishStore: pickCustom("englishStore"),
@@ -762,11 +942,14 @@ async function applyExpectedTitleOnOpenTicket(tag, item, expected) {
   const applyRes = await ttExecuteJavaScript(buildApplyTitleScript(expected));
   const label = (item.title || item.id || "").slice(0, 40);
   if (!applyRes?.ok) {
+    const reason = String(applyRes?.reason || "unknown");
     const extra =
       applyRes?.reason === "verify_mismatch"
         ? `（界面仍为「${String(applyRes.actual || "").slice(0, 80)}」）`
-        : "";
-    log(`标题修改失败：「${label}」。`, "error");
+        : reason === "no_title_editor"
+          ? "（请确认已打开工单详情）"
+          : "";
+    log(`标题修改失败：「${label}」— ${TD.log.formatReason(reason)}${extra}`, "error");
     notifyTitleNormalizeIssue(
       item,
       `${tag}：修改失败`,
@@ -856,7 +1039,7 @@ async function runNewTicketTitleNormalize(opts = {}) {
     await ensureChinaCitiesLoaded();
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    log("地址数据加载失败，标题检测可能不准确。", "error");
+    log(`地址数据加载失败，标题检测可能不准确：${TD.log.errText(e)}`, "error");
     notifyTitleNormalizeIssue(null, `${tag}：词典加载失败`, msg);
     titleNormalizeInProgress = false;
     syncTitleOnNewButtonState();
@@ -887,6 +1070,7 @@ async function runNewTicketTitleNormalize(opts = {}) {
 
   const processed = [];
   let appliedCount = 0;
+  let failedApplyCount = 0;
   let deferredDomCount = 0;
   let result = { applied: 0, deferred: 0, pendingNew: newOnes.length };
 
@@ -928,6 +1112,7 @@ async function runNewTicketTitleNormalize(opts = {}) {
 
       const applyRes = await applyExpectedTitleOnOpenTicket(tag, item, res.expected);
       if (applyRes?.ok) appliedCount += 1;
+      else failedApplyCount += 1;
     }
 
     markTicketsKnownForTitle(processed);
@@ -955,9 +1140,13 @@ async function runNewTicketTitleNormalize(opts = {}) {
     }
 
     if (!appliedCount) {
-      log("标题检测完成，无需修改。", "success");
+      if (failedApplyCount > 0) {
+        log(`标题检测完成，${failedApplyCount} 条修改失败，请查看上方失败日志。`, "warning");
+      } else {
+        log("标题检测完成，无需修改。", "success");
+      }
       await refreshTickets(refreshOpts);
-      result = { applied: 0, deferred: deferredDomCount, pendingNew: deferredDomCount };
+      result = { applied: 0, deferred: deferredDomCount, pendingNew: deferredDomCount, failed: failedApplyCount };
       return result;
     }
 
@@ -967,7 +1156,7 @@ async function runNewTicketTitleNormalize(opts = {}) {
     return result;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    log("标题修改中断，请稍后重试。", "error");
+    log(`标题修改中断：${TD.log.errText(err)}`, "error");
     notifyTitleNormalizeIssue(null, `${tag}：中断`, msg);
     try {
       await refreshTickets({ reset: false, skipAutoReload: !!opts.skipPageReload });
@@ -1195,8 +1384,7 @@ async function runTicketTitleNormalizeBatch() {
   try {
     await ensureChinaCitiesLoaded();
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    log("地址数据加载失败，请稍后重试。", "error");
+    log(`地址数据加载失败：${TD.log.errText(e)}`, "error");
     titleNormalizeInProgress = false;
     if (D.ticketTitleNormalizeBtn) D.ticketTitleNormalizeBtn.disabled = false;
     return;
@@ -1267,7 +1455,7 @@ async function runTicketTitleNormalizeBatch() {
     await refreshTickets({ reset: false });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    log("标题检测中断，请稍后重试。", "error");
+    log(`标题检测中断：${TD.log.errText(err)}`, "error");
     try {
       await refreshTickets({ reset: false });
     } catch {

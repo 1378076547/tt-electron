@@ -791,8 +791,7 @@
         if (isOwnedByApiUser(t, apiMis)) markTicketsKnown([t]);
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      log("高频问题检测异常，请稍后重试。", "warning");
+      log("高频问题检测异常：" + TD.log.errText(err), "warning");
     } finally {
       scanInFlight = false;
     }
@@ -859,8 +858,7 @@
         await processTicketScan(item, cfg, rgIds, apiMis, { isNewTrigger: true });
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      log("高频问题检测异常，请稍后重试。", "warning");
+      log("高频问题检测异常：" + TD.log.errText(err), "warning");
     } finally {
       scanInFlight = false;
     }

@@ -540,7 +540,7 @@ async function applyPriorityForActiveTicket() {
 
   const res = await applyPriorityInWebview(target);
   if (!res?.ok) {
-    log("优先级设置失败，请稍后重试。", "error");
+    log(`优先级设置失败：${TD.log.formatReason(res?.reason)}${formatPriorityApplyDebugSuffix(res)}`, "error");
   } else {
     log(`优先级已设为「${String(res.actual || target)}」。`, "success");
   }
@@ -616,7 +616,7 @@ async function applyPriorityBatch(options = {}) {
       const opened = await deps.handleTicketClick(item, { skipRefresh: true });
       if (!opened) {
         failCount += 1;
-        log(`${i + 1}/${toProcess.length} 设置失败：${label}`, "error");
+        log(`${i + 1}/${toProcess.length} 设置失败：${label} — 未能打开工单`, "error");
         continue;
       }
       await sleep(650);
@@ -627,7 +627,10 @@ async function applyPriorityBatch(options = {}) {
           const k = deps.getTicketSelectKey(item);
           if (k) autoPriorityBoostCooldown.set(k, Date.now());
         }
-        log(`${i + 1}/${toProcess.length} 设置失败：${label}`, "error");
+        log(
+          `${i + 1}/${toProcess.length} 设置失败：${label} — ${TD.log.formatReason(res?.reason)}${formatPriorityApplyDebugSuffix(res)}`,
+          "error"
+        );
       } else {
         okCount += 1;
         log(`${i + 1}/${toProcess.length} 已设置：${label}`, "success");

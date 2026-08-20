@@ -52,6 +52,18 @@
     return s;
   }
 
+  /** 自定义字段「所在城市」→ 标题用城市简称（词典匹配 + 去行政区划后缀） */
+  function resolveCustomChineseCityShort(raw, matchers) {
+    const s = String(raw || "")
+      .trim()
+      .replace(/\s+/g, "");
+    if (!s) return "";
+    const hit = findCityInSegment(s, matchers);
+    if (hit) return hit;
+    const short = toDisplayCityShort(s);
+    return short || s.replace(/市$|地区$|盟$|州$/, "");
+  }
+
   /** 在一段路径文本中找第一个命中的城市（已按 full 长度降序） */
   function findCityInSegment(segment, matchers) {
     const seg = String(segment || "");
@@ -518,7 +530,7 @@
   }
 
   /**
-   * @param {object} inspect { architectureRaw, warehouseStore, currentTitle, englishCity?, englishStore?, englishIdName? }
+   * @param {object} inspect { architectureRaw, warehouseStore, chineseCity?, currentTitle, englishCity?, englishStore?, englishIdName? }
    * @param {object} chinaJson china_cities.json 根对象
    */
   function computeExpectedTitle(inspect, chinaJson) {
@@ -546,9 +558,20 @@
       return { ok: false, skip: true, reason: "未能解析事业部简称，跳过" };
     }
 
-    let cityShort = extractCityFromServiceStationSegment(segments, matchers);
+    const customCityRaw = String(inspect?.chineseCity || "").trim();
+    let cityShort = "";
+    let citySource = "";
+    if (customCityRaw) {
+      cityShort = resolveCustomChineseCityShort(customCityRaw, matchers);
+      if (cityShort) citySource = "custom";
+    }
+    if (!cityShort) {
+      cityShort = extractCityFromServiceStationSegment(segments, matchers);
+      if (cityShort) citySource = "arch_service";
+    }
     if (!cityShort) {
       cityShort = findCityRightToLeft(segments, matchers);
+      if (cityShort) citySource = "arch";
     }
     if (!cityShort) {
       return { ok: false, skip: true, reason: "无法解析城市（请手动改标题）" };
@@ -598,6 +621,7 @@
         prefix,
         buShort,
         cityShort,
+        citySource,
         stationNorm,
         stationSource,
         stationCombineNote,
@@ -615,6 +639,7 @@
       body,
       buShort,
       cityShort,
+      citySource,
       stationNorm,
       stationSource,
       stationCombineNote,

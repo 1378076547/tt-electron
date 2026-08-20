@@ -456,7 +456,7 @@ async function syncPmCsvFromS3(options = {}) {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     updatePmCsvPathLabel("同步异常");
-    if (!silent) log("PM 表同步异常，请稍后重试。", "error");
+    if (!silent) log(`PM 表同步异常：${TD.log.errText(err)}`, "error");
     return { ok: false, message: msg };
   }
 }
@@ -892,7 +892,7 @@ async function runPmPullByRegion() {
     }
     const opened = await deps.handleTicketClick(active, { skipRefresh: true });
     if (!opened) {
-      log("无法打开工单，已取消拉人。", "error");
+      log(`无法打开工单，已取消拉人。`, "error");
       return;
     }
     await sleep(600);
@@ -903,13 +903,13 @@ async function runPmPullByRegion() {
 
     const fileRes = await window.ttDesktopApi?.readTextFile?.(csvPath);
     if (!fileRes?.ok) {
-      log("配置文件读取失败，请重新选择。", "error");
+      log(`配置文件读取失败：${fileRes?.message || fileRes?.error || "请重新选择"}。`, "error");
       return;
     }
     const parsed = parsePmCsvContent(fileRes.content || "");
     if (parsed.error || !parsed.rules.length) {
       logPmCsvValidationReport(parsed, { silent: false, source: "读取" });
-      log("配置文件为空或格式不正确，请检查内容。", "error");
+      log(`配置文件为空或格式不正确：${parsed.error || "无有效地区规则"}。`, "error");
       return;
     }
     if (parsed.warnings?.length) {
@@ -948,14 +948,15 @@ async function runPmPullByRegion() {
     const res = await ttExecuteJavaScript(buildPullPmMembersScript(pmTargets));
     if (!res?.ok) {
       const extra = Array.isArray(res?.logs) && res.logs.length ? `\n  明细：${res.logs.join("；")}` : "";
-      log("拉人未完成，请稍后重试。", "error");
+      const reasonHint = TD.log.formatReason(res?.reason);
+      const detail = res?.detail ? `「${String(res.detail).slice(0, 60)}」` : "";
+      log(`拉人未完成：${reasonHint}${detail}${extra}`, "error");
     } else {
       const extra = Array.isArray(res?.logs) && res.logs.length ? `\n  明细：${res.logs.join("；")}` : "";
-      log("拉人完成。", "success");
+      log(`拉人完成。${extra}`, "success");
     }
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    log("拉人异常，请稍后重试。", "error");
+    log(`拉人异常：${TD.log.errText(err)}`, "error");
   } finally {
     setPmPullBusy(false);
     try {
