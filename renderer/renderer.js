@@ -719,6 +719,22 @@ function buildCheckAndHandleScript(handler, autoCreateGroup, elephantMessage, el
         return '';
       }
 
+      /** 系统电表告警：标题以【电表异常】结尾，且发起人为 Retail/it_retail */
+      function getReporterHint(scope) {
+        const root = scope || getDetailScope() || document;
+        const active = document.querySelector('.handle-ticket-nav-item-active');
+        const fromList = (active?.textContent || '').trim();
+        const fromDetail = (root.textContent || '').trim();
+        return (fromList + '\\n' + fromDetail).replace(/\\s+/g, '');
+      }
+
+      function isMeterAlarmTicket(scope) {
+        const title = String(getCurrentTicketTitle() || '').replace(/\\s+/g, '');
+        if (!title.endsWith('【电表异常】')) return false;
+        const hint = getReporterHint(scope).toLowerCase();
+        return hint.includes('it_retail') || hint.includes('retail/it_retail');
+      }
+
       function normalizeTitleForKeywordMatch(raw) {
         return String(raw || '').toLowerCase().replace(/\\s+/g, '');
       }
@@ -912,6 +928,10 @@ function buildCheckAndHandleScript(handler, autoCreateGroup, elephantMessage, el
         if (!HANDLE_TEXTS.some((t) => text.includes(t))) continue;
 
         el.click();
+        // 系统电表告警单：仍接单，但不建群、不发话术
+        if (isMeterAlarmTicket(scope)) {
+          return { status: 'clicked_handle|meter_alarm_skip_group', pendingCount: systemTodoCount };
+        }
         if (!autoCreateGroup) return { status: 'clicked_handle', pendingCount: systemTodoCount };
 
         await sleep(1200);
@@ -972,6 +992,8 @@ function statusToMessage(status) {
       return "工单操作按钮未就绪，请稍后重试。";
     case "clicked_handle":
       return "已开始处理工单。";
+    case "clicked_handle|meter_alarm_skip_group":
+      return "系统电表告警单，已接单，已跳过建群与话术。";
     case "clicked_handle|group_confirmed":
       return "已开始处理，大象群已创建。";
     case "clicked_handle|group_session_ready":
@@ -1007,6 +1029,7 @@ function statusToLevel(status) {
 
   if (
     status === "clicked_handle" ||
+    status === "clicked_handle|meter_alarm_skip_group" ||
     status === "clicked_handle|group_confirmed" ||
     status === "clicked_handle|group_session_ready" ||
     status === "clicked_handle|group_session_ready_and_sent"
@@ -1905,6 +1928,11 @@ function bindEvents() {
     log("工单页面已就绪。", "success");
     scheduleGuestIdleWork(async () => {
       await onTtPageLifecycle({ reset: true });
+      try {
+        void TD.sla.paintTtSlaTitlesInWebview?.();
+      } catch {
+        // ignore
+      }
     });
   });
 
@@ -2305,7 +2333,10 @@ function bindModuleDeps() {
   TD.sla.bind({
     makeStableKey,
     applyTicketFilters,
-    getTickets
+    getTickets,
+    getWebviewReady: () => webviewReady,
+    getTtWebview: () => getAutomationWebview(),
+    ttExecuteJavaScript
   });
   TD.templates.bind({
     getActiveTicketTitle: () => {
@@ -2376,6 +2407,7 @@ function init() {
   void applyAppVersionDisplay();
   void logTtApiConfigStatus().then(() => setupApiTicketPolling());
   ensureTicketElapsedTimer();
+  TD.sla.ensureTtSlaPaintTimer?.();
   restartTitlePatrolTimer();
 }
 

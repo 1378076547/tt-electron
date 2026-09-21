@@ -15,12 +15,19 @@
   let deps = {
     makeStableKey: (item) => "",
     applyTicketFilters: (list) => list,
-    getTickets: () => []
+    getTickets: () => [],
+    getWebviewReady: () => false,
+    getTtWebview: () => null,
+    ttExecuteJavaScript: async () => null
   };
 
   function bind(extra) {
     deps = { ...deps, ...extra };
   }
+
+  /** @type {ReturnType<typeof setInterval> | null} */
+  let ttSlaPaintTimer = null;
+  let ttSlaPaintInFlight = false;
 
   function formatElapsedSinceCreated(epochMs, nowMs = Date.now()) {
     const start = Number(epochMs);
@@ -172,12 +179,222 @@
     return { warn, overdue };
   }
 
+  function collectRiskTicketIds() {
+    const ids = new Set();
+    try {
+      for (const id of TD.hfIssue?.getActiveOpenTicketIds?.() || []) {
+        const s = String(id || "").trim();
+        if (s) ids.add(s);
+      }
+    } catch {
+      // ignore
+    }
+    try {
+      for (const id of TD.burstOutbreak?.getActiveOpenTicketIds?.() || []) {
+        const s = String(id || "").trim();
+        if (s) ids.add(s);
+      }
+    } catch {
+      // ignore
+    }
+    return ids;
+  }
+
+  function buildTtSlaPaintPayload(settings, list, nowMs = Date.now()) {
+    /** @type {Record<string, "warn"|"overdue">} */
+    const byId = {};
+    /** @type {Record<string, "warn"|"overdue">} */
+    const byTitle = {};
+    const riskIds = collectRiskTicketIds();
+
+    if (settings?.enabled) {
+      for (const item of list) {
+        const stage = getTicketSlaStage(item, settings, nowMs);
+        if (!stage) continue;
+        const id = String(item?.id || "").trim();
+        if (id) {
+          if (byId[id] !== "overdue") byId[id] = stage;
+        }
+        const title = String(item?.title || "")
+          .trim()
+          .replace(/\s+/g, " ");
+        if (title) {
+          if (byTitle[title] !== "overdue") byTitle[title] = stage;
+        }
+      }
+    }
+
+    // 高频 / 短时故障：关联工单标题染红（与 48h 超时同色）
+    if (riskIds.size) {
+      const titleById = new Map();
+      for (const item of list) {
+        const id = String(item?.id || "").trim();
+        const title = String(item?.title || "")
+          .trim()
+          .replace(/\s+/g, " ");
+        if (id && title) titleById.set(id, title);
+      }
+      for (const id of riskIds) {
+        byId[id] = "overdue";
+        const title = titleById.get(id);
+        if (title) byTitle[title] = "overdue";
+      }
+    }
+
+    const enabled = !!(settings?.enabled || riskIds.size || Object.keys(byId).length || Object.keys(byTitle).length);
+    return { enabled, byId, byTitle };
+  }
+
+  async function paintTtSlaTitlesInWebview() {
+    if (ttSlaPaintInFlight) return;
+    if (!deps.getWebviewReady?.() || !deps.getTtWebview?.()) return;
+    if (typeof deps.ttExecuteJavaScript !== "function") return;
+
+    ttSlaPaintInFlight = true;
+    try {
+      const settings = getSlaSettings();
+      const list = deps.applyTicketFilters(deps.getTickets());
+      const payload = buildTtSlaPaintPayload(settings, list);
+      await deps.ttExecuteJavaScript(buildPaintTtSlaTitlesScript(payload));
+    } catch {
+      // ignore guest paint errors
+    } finally {
+      ttSlaPaintInFlight = false;
+    }
+  }
+
+  function ensureTtSlaPaintTimer() {
+    if (ttSlaPaintTimer) return;
+    ttSlaPaintTimer = setInterval(() => {
+      if (!deps.getWebviewReady?.() || !deps.getTtWebview?.()) return;
+      void paintTtSlaTitlesInWebview();
+    }, 4000);
+  }
+
+  function buildPaintTtSlaTitlesScript(payload) {
+    const safe = JSON.stringify(payload || { enabled: false, byId: {}, byTitle: {} });
+    return `
+      (() => {
+        const payload = ${safe};
+        const STYLE_ID = 'tt-desktop-sla-title-style';
+        const MARK = 'tt-desktop-sla-title';
+
+        function ensureStyle() {
+          let el = document.getElementById(STYLE_ID);
+          if (el) return;
+          el = document.createElement('style');
+          el.id = STYLE_ID;
+          el.textContent =
+            '.' + MARK + '-warn{color:#fb923c !important;}' +
+            '.' + MARK + '-overdue{color:#f87171 !important;font-weight:600 !important;}';
+          (document.head || document.documentElement).appendChild(el);
+        }
+
+        function clearMarks(root) {
+          const nodes = (root || document).querySelectorAll('.' + MARK + '-warn, .' + MARK + '-overdue');
+          for (const n of nodes) {
+            n.classList.remove(MARK + '-warn', MARK + '-overdue');
+          }
+        }
+
+        function norm(t) {
+          return String(t || '').trim().replace(/\\s+/g, ' ');
+        }
+
+        function guessId(item) {
+          const attrKeys = ['data-ticket-id', 'data-id', 'data-ticketid', 'ticket-id', 'ticketid'];
+          for (const k of attrKeys) {
+            const v = norm(item.getAttribute?.(k) || '');
+            const m = v.match(/\\d{6,}/);
+            if (m) return m[0];
+          }
+          const ds = item.dataset || {};
+          for (const k of ['ticketId', 'ticketid', 'id']) {
+            const v = norm(ds[k] || '');
+            const m = v.match(/\\d{6,}/);
+            if (m) return m[0];
+          }
+          const href = norm(
+            item.getAttribute?.('href') ||
+              item.querySelector?.('a[href]')?.getAttribute?.('href') ||
+              ''
+          );
+          const hm = href.match(/(\\d{6,})/);
+          if (hm) return hm[1];
+          const raw = norm(item.textContent || '');
+          const mid = raw.match(/编号\\s*[:：]\\s*(\\d{6,})/);
+          return mid ? mid[1] : '';
+        }
+
+        function guessTitle(item) {
+          return (
+            norm(item.querySelector('.ticket-name-text-display')?.textContent || '') ||
+            norm(item.querySelector('.tt-hover-field .ticket-name-text-display')?.textContent || '') ||
+            norm(item.querySelector('.content.title')?.textContent || '') ||
+            norm(item.querySelector('.title')?.textContent || '')
+          );
+        }
+
+        function titleNode(item) {
+          return (
+            item.querySelector('.ticket-name-text-display') ||
+            item.querySelector('.tt-hover-field .ticket-name-text-display') ||
+            item.querySelector('.content.title') ||
+            item.querySelector('.title')
+          );
+        }
+
+        function getListItems() {
+          const wrapper =
+            document.querySelector('.handle-list-wrapper') ||
+            document.querySelector('.handle-ticket-list') ||
+            document.querySelector('#ticket-detail')?.closest?.('.detail-with-list-container');
+          let list = wrapper
+            ? Array.from(wrapper.querySelectorAll('.handle-ticket-nav-item'))
+            : [];
+          if (!list.length) {
+            list = Array.from(document.querySelectorAll('.handle-ticket-nav-item'));
+          }
+          return list;
+        }
+
+        ensureStyle();
+        const items = getListItems();
+        clearMarks(document);
+
+        if (!payload || !payload.enabled) {
+          return { ok: true, painted: 0, cleared: true, rows: items.length };
+        }
+
+        const byId = payload.byId || {};
+        const byTitle = payload.byTitle || {};
+        let painted = 0;
+        for (const item of items) {
+          const id = guessId(item);
+          const title = guessTitle(item);
+          let stage = '';
+          if (id && byId[id]) stage = byId[id];
+          else if (title && byTitle[title]) stage = byTitle[title];
+          if (!stage) continue;
+          const node = titleNode(item);
+          if (!node) continue;
+          node.classList.add(MARK + '-' + stage);
+          painted += 1;
+        }
+        return { ok: true, painted, rows: items.length };
+      })()
+    `;
+  }
+
   function runSlaScan({ emitAlerts = false } = {}) {
     const settings = getSlaSettings();
     const filtered = deps.applyTicketFilters(deps.getTickets());
     const now = Date.now();
     const { warn, overdue } = countSlaTickets(filtered, settings, now);
     updateSlaSummaryUi(warn, overdue, settings.enabled);
+
+    void paintTtSlaTitlesInWebview();
+    ensureTtSlaPaintTimer();
 
     if (!settings.enabled || !emitAlerts) return { warn, overdue };
 
@@ -226,7 +443,9 @@
     getTicketElapsedHours,
     getTicketSlaStage,
     runSlaScan,
+    paintTtSlaTitlesInWebview,
     updateTicketElapsedDisplays,
-    ensureTicketElapsedTimer
+    ensureTicketElapsedTimer,
+    ensureTtSlaPaintTimer
   };
 })(window.TTDesktop);

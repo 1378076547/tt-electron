@@ -607,6 +607,22 @@
         D.hfIssueSummaryEl.textContent = lines.join(" ｜ ");
       }
     }
+    try {
+      void TD.sla?.paintTtSlaTitlesInWebview?.();
+    } catch {
+      // ignore
+    }
+  }
+
+  function getActiveOpenTicketIds() {
+    const ids = new Set();
+    for (const alert of activeAlerts.values()) {
+      for (const id of alert.openTicketIds || []) {
+        const s = String(id || "").trim();
+        if (s) ids.add(s);
+      }
+    }
+    return Array.from(ids);
   }
 
   function shouldNotifyWindows(cfg) {
@@ -887,6 +903,7 @@
     clearOnStop,
     clearMemoryCaches,
     requestHfIssueAfterRefresh,
-    runHfIssueScan
+    runHfIssueScan,
+    getActiveOpenTicketIds
   };
 })(window.TTDesktop);

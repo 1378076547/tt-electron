@@ -739,15 +739,90 @@ function buildPullPmMembersScript(targets) {
           .join(' | ');
         return { ok: false, reason: 'not_found', detail: hint };
       }
-      function clickConfirm() {
-        const nodes = Array.from(document.querySelectorAll('button, .mtd-btn'));
-        for (const b of nodes) {
-          if (norm(b.textContent) === '确定' && visible(b)) {
-            b.click();
-            return true;
-          }
+      function isDisabledBtn(b) {
+        if (!b) return true;
+        if (b.disabled) return true;
+        if (b.getAttribute && b.getAttribute('disabled') != null) return true;
+        const cls = String(b.className || '');
+        if (cls.includes('is-disabled') || cls.includes('mtd-btn-disabled') || cls.includes('disabled')) return true;
+        try {
+          if (b.getAttribute('aria-disabled') === 'true') return true;
+        } catch {
+          // ignore
         }
         return false;
+      }
+
+      function findConfirmButton(modal) {
+        const roots = [modal, document.body].filter(Boolean);
+        for (const root of roots) {
+          const nodes = Array.from(root.querySelectorAll('button, .mtd-btn'));
+          for (const b of nodes) {
+            if (norm(b.textContent) !== '确定') continue;
+            if (!visible(b)) continue;
+            return b;
+          }
+        }
+        return null;
+      }
+
+      function clickConfirm(modal) {
+        const b = findConfirmButton(modal);
+        if (!b) return { ok: false, reason: 'no_confirm' };
+        if (isDisabledBtn(b)) return { ok: false, reason: 'confirm_disabled' };
+        try {
+          b.click();
+          return { ok: true };
+        } catch {
+          return { ok: false, reason: 'no_confirm' };
+        }
+      }
+
+      /** 关闭「添加成员」弹窗：优先取消，再点右上角 mtdicon-close-thick */
+      function dismissAddMemberModal(modal) {
+        const root = modal || findAddMemberModal() || document.body;
+        const btns = Array.from(root.querySelectorAll('button, .mtd-btn'));
+        for (const b of btns) {
+          if (norm(b.textContent) === '取消' && visible(b) && !isDisabledBtn(b)) {
+            try {
+              b.click();
+              return 'cancel';
+            } catch {
+              // ignore
+            }
+          }
+        }
+        const icons = Array.from(
+          (modal || document).querySelectorAll(
+            'i.mtdicon-close-thick, .mtdicon-close-thick, i.mtdicon.mtdicon-close-thick'
+          )
+        );
+        for (const icon of icons) {
+          if (!visible(icon) && icon.offsetParent === null) continue;
+          const host =
+            icon.closest('button') ||
+            icon.closest('[role="button"]') ||
+            icon.closest('a') ||
+            icon.closest('.mtd-modal-close') ||
+            icon.parentElement;
+          try {
+            if (host && typeof host.click === 'function') host.click();
+            else icon.click();
+            return 'close_icon';
+          } catch {
+            // ignore
+          }
+        }
+        return '';
+      }
+
+      async function waitModalGone(maxMs) {
+        const end = Date.now() + maxMs;
+        while (Date.now() < end) {
+          if (!findAddMemberModal()) return true;
+          await sleep(120);
+        }
+        return !findAddMemberModal();
       }
 
       if (!targets || !targets.length) return { ok: false, reason: 'empty_targets' };
@@ -796,6 +871,7 @@ function buildPullPmMembersScript(targets) {
         return lastFail;
       }
 
+      let selectedCount = 0;
       for (const target of targets) {
         if (!target || !target.mis) continue;
         const label = target.name ? target.name + '/' + target.mis : target.mis;
@@ -809,6 +885,7 @@ function buildPullPmMembersScript(targets) {
           }
           continue;
         }
+        selectedCount += 1;
         if (pick.mode === 'mis_only' || pick.mode === 'mis_only_config') {
           logs.push(
             '已选择：' +
@@ -825,13 +902,47 @@ function buildPullPmMembersScript(targets) {
         await sleep(220);
       }
 
-      if (!clickConfirm()) {
+      let confirmRes = clickConfirm(modal);
+      if (!confirmRes.ok && confirmRes.reason === 'no_confirm') {
         await sleep(350);
-        if (!clickConfirm()) {
-          return { ok: false, reason: 'no_confirm', logs };
-        }
+        confirmRes = clickConfirm(modal);
       }
-      await sleep(300);
+
+      // 人都已在群时「确定」常为禁用或点了不关窗：必须关弹窗，避免卡界面
+      if (!confirmRes.ok) {
+        if (confirmRes.reason === 'confirm_disabled') {
+          logs.push('「确定」不可用（成员可能均已在群），改为关闭弹窗');
+        } else {
+          logs.push('未找到可用的「确定」，改为关闭弹窗');
+        }
+        const how = dismissAddMemberModal(modal);
+        if (how) logs.push('已关闭添加成员弹窗（' + how + '）');
+        const gone = await waitModalGone(2500);
+        if (!gone) {
+          dismissAddMemberModal(findAddMemberModal());
+          await waitModalGone(1500);
+        }
+        if (findAddMemberModal()) {
+          return { ok: false, reason: 'modal_stuck', logs };
+        }
+        return {
+          ok: true,
+          reason: selectedCount ? 'dismissed_no_new' : 'dismissed_empty',
+          logs
+        };
+      }
+
+      await sleep(400);
+      let gone = await waitModalGone(3500);
+      if (!gone) {
+        logs.push('点「确定」后弹窗仍在，尝试关闭（成员可能已在群）');
+        const how = dismissAddMemberModal(findAddMemberModal() || modal);
+        if (how) logs.push('已关闭添加成员弹窗（' + how + '）');
+        gone = await waitModalGone(2500);
+      }
+      if (!gone && findAddMemberModal()) {
+        return { ok: false, reason: 'modal_stuck', logs };
+      }
       return { ok: true, logs };
     })()
   `;
@@ -953,7 +1064,12 @@ async function runPmPullByRegion() {
       log(`拉人未完成：${reasonHint}${detail}${extra}`, "error");
     } else {
       const extra = Array.isArray(res?.logs) && res.logs.length ? `\n  明细：${res.logs.join("；")}` : "";
-      log(`拉人完成。${extra}`, "success");
+      const reason = String(res?.reason || "");
+      if (reason === "dismissed_no_new" || reason === "dismissed_empty") {
+        log(`拉人结束：成员可能已在群内，已关闭添加成员弹窗。${extra}`, "warning");
+      } else {
+        log(`拉人完成。${extra}`, "success");
+      }
     }
   } catch (err) {
     log(`拉人异常：${TD.log.errText(err)}`, "error");
