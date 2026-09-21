@@ -51,7 +51,7 @@
     const now = Number(nowMs);
     if (!Number.isFinite(start) || !Number.isFinite(now)) return "";
     const hr = Math.max(0, now - start) / 3600000;
-    if (hr >= 40) return "ticket-elapsed--critical";
+    if (hr >= C.DEFAULT_SLA_WARN_HOURS) return "ticket-elapsed--critical";
     if (hr >= 8) return "ticket-elapsed--warn";
     if (hr >= 4) return "ticket-elapsed--caution";
     return "";
