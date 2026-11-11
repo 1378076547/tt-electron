@@ -1,5 +1,5 @@
 /**
- * 处理人已回复则暂停：API 认 lastReplierMisId，且距 lastReplyTime 超过 15 分钟（北京时间），再 DOM 点「暂停TT」
+ * 处理人已回复则暂停：API 认 lastReplierMisId，且距 lastReplyTime 超过设定分钟数（北京时间，默认 15），再 DOM 点「暂停TT」
  */
 (function initPauseOnReply(TD) {
   const C = TD.constants;
@@ -10,7 +10,9 @@
   const REASON = C.PAUSE_ON_REPLY_REASON;
   const DEFAULT_DESC = C.PAUSE_ON_REPLY_DEFAULT_DESC;
   const COOLDOWN_MS = C.PAUSE_ON_REPLY_COOLDOWN_MS;
-  const WAIT_MS = C.PAUSE_ON_REPLY_WAIT_MS;
+  const WAIT_MIN_DEFAULT = C.PAUSE_ON_REPLY_WAIT_MINUTES_DEFAULT;
+  const WAIT_MIN_MIN = C.PAUSE_ON_REPLY_WAIT_MINUTES_MIN;
+  const WAIT_MIN_MAX = C.PAUSE_ON_REPLY_WAIT_MINUTES_MAX;
   const MAX_PER_ROUND = C.PAUSE_ON_REPLY_MAX_PER_ROUND;
 
   let deps = {
@@ -73,6 +75,35 @@
     }
   }
 
+  function clampWaitMinutes(raw) {
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return WAIT_MIN_DEFAULT;
+    return Math.max(WAIT_MIN_MIN, Math.min(WAIT_MIN_MAX, Math.floor(n)));
+  }
+
+  function getWaitMinutes() {
+    const saved = localStorage.getItem(C.STORAGE_KEYS.pauseOnReplyWaitMinutes);
+    if (saved != null && String(saved).trim() !== "") return clampWaitMinutes(saved);
+    return WAIT_MIN_DEFAULT;
+  }
+
+  function persistWaitMinutes() {
+    const n = clampWaitMinutes(D.pauseOnReplyWaitInput?.value);
+    localStorage.setItem(C.STORAGE_KEYS.pauseOnReplyWaitMinutes, String(n));
+    if (D.pauseOnReplyWaitInput) D.pauseOnReplyWaitInput.value = String(n);
+    return n;
+  }
+
+  function fillWaitInput() {
+    if (!D.pauseOnReplyWaitInput) return;
+    const saved = localStorage.getItem(C.STORAGE_KEYS.pauseOnReplyWaitMinutes);
+    D.pauseOnReplyWaitInput.value = String(clampWaitMinutes(saved == null || saved === "" ? WAIT_MIN_DEFAULT : saved));
+  }
+
+  function getWaitMs() {
+    return getWaitMinutes() * 60 * 1000;
+  }
+
   function isProcessing(item) {
     const st = String(item?.statusText || "");
     if (st.includes("暂停") || st.includes("已关闭") || st.includes("关闭") || st.includes("已完成")) return false;
@@ -100,7 +131,7 @@
     const ts = parseLastReplyEpoch(item);
     const now = TD.time?.nowBeijingEpochMs?.();
     if (ts == null || !Number.isFinite(now)) return false;
-    return now - ts > WAIT_MS;
+    return now - ts > getWaitMs();
   }
 
   function inCooldown(id) {
@@ -377,6 +408,9 @@
     isInProgress,
     getPauseDesc,
     persistDesc,
+    getWaitMinutes,
+    persistWaitMinutes,
+    fillWaitInput,
     requestPauseOnReplyAfterRefresh,
     runPauseOnReplyScan
   };

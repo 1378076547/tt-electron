@@ -1168,22 +1168,6 @@ body {
   accent-color: #38bdf8;
 }
 
-.pause-on-reply-desc-field {
-  flex: 1 1 220px;
-}
-
-.pause-on-reply-desc-input {
-  min-width: 160px;
-  flex: 1 1 180px;
-  height: 26px;
-  padding: 0 8px;
-  border-radius: 6px;
-  border: 1px solid var(--border-strong);
-  background: var(--bg-input);
-  color: var(--text);
-  font-size: 12px;
-}
-
 .ticket-filter-input {
   flex: 1 1 170px;
   min-width: 140px;

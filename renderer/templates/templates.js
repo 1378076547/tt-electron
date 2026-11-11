@@ -239,6 +239,7 @@
     localStorage.setItem(C.STORAGE_KEYS.elephantMessageEn, nextDefaultEn);
     const rules = collectRulesFromUI();
     saveElephantRules(rules);
+    TD.pauseOnReply?.persistDesc?.();
     log(
       `话术模板已保存：${rules.length} 条规则；中文默认 ${nextDefaultZh ? "已设置" : "为空"}，英文默认 ${nextDefaultEn ? "已设置" : "为空"}。`,
       "success"

@@ -34,6 +34,7 @@ const {
   titleOnNewAutoInput,
   pauseOnReplyInput,
   pauseOnReplyDescInput,
+  pauseOnReplyWaitInput,
   startBtn,
   logList,
   ttWebview,
@@ -521,6 +522,7 @@ function loadSettings() {
     const savedDesc = String(localStorage.getItem(STORAGE_KEYS.pauseOnReplyDesc) || "").trim();
     pauseOnReplyDescInput.value = savedDesc || C.PAUSE_ON_REPLY_DEFAULT_DESC;
   }
+  TD.pauseOnReply?.fillWaitInput?.();
 }
 
 function buildPendingCountScript() {
@@ -2165,6 +2167,7 @@ function closeApiSettingsModal() {
   if (!apiSettingsModal) return;
   apiSettingsModal.hidden = true;
   setApiSettingsError("");
+  TD.pauseOnReply?.fillWaitInput?.();
 }
 
 function appendApiRgIdRow(value = "", { focus = true } = {}) {
@@ -2253,6 +2256,7 @@ async function openApiSettingsModal() {
       rgIds = TARGET_RG_IDS.map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0);
     }
     renderApiRgIdRows(rgIds);
+    TD.pauseOnReply?.fillWaitInput?.();
     if (apiSettingsPath) {
       const p = cfg?.path || "";
       const err = cfg?.configError ? `（读取异常：${cfg.configError}）` : "";
@@ -2294,6 +2298,7 @@ async function saveApiSettingsFromForm() {
       setApiSettingsError(res?.message || "保存失败");
       return;
     }
+    const waitMin = TD.pauseOnReply?.persistWaitMinutes?.();
     // 同步界面处理人，避免 API username 与处理人不一致
     if (handlerInput && username) {
       handlerInput.value = username;
@@ -2301,6 +2306,7 @@ async function saveApiSettingsFromForm() {
     }
     closeApiSettingsModal();
     log(res.message || "API 配置已保存。", "success");
+    if (Number.isFinite(waitMin)) log(`回复后暂停等待已设为 ${waitMin} 分钟。`, "muted");
     if (res.path) log(`配置已写入：${res.path}`, "muted");
     await setupApiTicketPolling();
   } catch (err) {

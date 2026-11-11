@@ -197,16 +197,6 @@
                   <input id="ticketSlaNotifyToggle" type="checkbox" />
                   <span>Windows通知</span>
                 </label>
-                <label class="ticket-filter-check pause-on-reply-desc-field" title="暂停弹窗里「描述」的默认话术，可随时改">
-                  <span>暂停描述</span>
-                  <input
-                    id="pauseOnReplyDescInput"
-                    class="pause-on-reply-desc-input"
-                    type="text"
-                    maxlength="200"
-                    placeholder="等待用户回复确认并反馈。"
-                  />
-                </label>
               </div>
               <div id="ticketSlaSummary" class="ticket-sla-summary" hidden aria-live="polite"></div>
               <div id="hfIssueSummary" class="hf-issue-summary" hidden aria-live="polite"></div>
@@ -241,6 +231,18 @@
               <label class="templates-field">
                 <div class="templates-label">英文默认话术（兜底）</div>
                 <textarea id="defaultMessageEnTextarea" class="templates-textarea" rows="3" placeholder="未命中规则且标题含英文时发送"></textarea>
+              </label>
+
+              <label class="templates-field">
+                <div class="templates-label">回复后暂停 · 描述</div>
+                <div class="templates-help">顶栏勾选「回复后暂停」后，自动点暂停TT时填入弹窗描述。点上方「保存」一并记下。等待时长在「文件 → API 设置」。</div>
+                <textarea
+                  id="pauseOnReplyDescInput"
+                  class="templates-textarea"
+                  rows="2"
+                  maxlength="200"
+                  placeholder="等待用户回复确认并反馈。"
+                ></textarea>
               </label>
 
               <div class="templates-field">
@@ -381,6 +383,19 @@
           <div id="apiRgIdsList" class="api-rgids-list" role="list"></div>
           <button id="apiRgIdsAddBtn" class="api-rgids-add-btn" type="button">+ 添加工单组</button>
         </div>
+        <label class="api-settings-field">
+          <span class="api-settings-label">回复后暂停 · 等待分钟</span>
+          <input
+            id="pauseOnReplyWaitInput"
+            class="api-settings-input"
+            type="number"
+            min="1"
+            max="240"
+            value="15"
+            step="1"
+          />
+        </label>
+        <p class="api-settings-field-hint">处理人回复后，超过该分钟数（北京时间）才自动暂停。默认 15，范围 1～240。点保存记在本机，不写入令牌文件。</p>
         <p id="apiSettingsPath" class="api-settings-path" aria-live="polite"></p>
         <p id="apiSettingsError" class="api-settings-error" hidden aria-live="polite"></p>
         <div class="api-settings-actions">

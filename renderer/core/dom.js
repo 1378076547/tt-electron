@@ -13,6 +13,7 @@
     titleOnNewAutoInput: document.getElementById("titleOnNewAutoInput"),
     pauseOnReplyInput: document.getElementById("pauseOnReplyInput"),
     pauseOnReplyDescInput: document.getElementById("pauseOnReplyDescInput"),
+    pauseOnReplyWaitInput: document.getElementById("pauseOnReplyWaitInput"),
     startBtn: document.getElementById("startBtn"),
     logList: document.getElementById("logList"),
     ttWebview: document.getElementById("ttWebview"),
