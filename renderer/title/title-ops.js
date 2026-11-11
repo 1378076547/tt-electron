@@ -39,6 +39,7 @@
     getPendingRunAfterReload: () => false,
     getPriorityBatchInProgress: () => false,
     getPmPullInProgress: () => false,
+    getPauseOnReplyInProgress: () => false,
     getTitleOnNewAutoEnabled: () => false,
     getTitlePatrolLogEnabled: () => false,
     flushAutoPriorityBoostQueueIfPossible: async () => {},
@@ -1301,7 +1302,14 @@ async function flushTitleOnNewQueueIfPossible() {
     titleOnNewQueued = false;
     return;
   }
-  if (titleNormalizeInProgress || deps.getBusy() || deps.getPendingRunAfterReload() || deps.getPriorityBatchInProgress() || deps.getPmPullInProgress()) {
+  if (
+    titleNormalizeInProgress ||
+    deps.getBusy() ||
+    deps.getPendingRunAfterReload() ||
+    deps.getPriorityBatchInProgress() ||
+    deps.getPmPullInProgress() ||
+    deps.getPauseOnReplyInProgress?.()
+  ) {
     return;
   }
   if (deps.isTtDomSyncPending() || deps.isTtWebviewReloadInFlight?.()) {

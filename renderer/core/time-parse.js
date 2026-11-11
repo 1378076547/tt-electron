@@ -1,7 +1,49 @@
 /**
- * 工单创建时间解析与展示（阶段 1）
+ * 工单时间解析与展示：列表历时用创建时间；暂停等待用北京时间（与顶栏时钟同源）
  */
 (function initTimeParse(TD) {
+  const BEIJING_TZ = "Asia/Shanghai";
+  const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
+
+  const beijingPartsFormatter = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: BEIJING_TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false
+  });
+
+  function getBeijingDateParts(date = new Date()) {
+    const parts = beijingPartsFormatter.formatToParts(date);
+    const pick = (type) => Number(parts.find((p) => p.type === type)?.value);
+    return {
+      year: pick("year"),
+      month: pick("month"),
+      day: pick("day"),
+      hour: pick("hour"),
+      minute: pick("minute"),
+      second: pick("second")
+    };
+  }
+
+  function beijingWallToEpochMs(year, month, day, hour, minute, second) {
+    return Date.UTC(year, month - 1, day, hour, minute, second || 0) - BEIJING_OFFSET_MS;
+  }
+
+  function nowBeijingEpochMs() {
+    const p = getBeijingDateParts();
+    return beijingWallToEpochMs(p.year, p.month, p.day, p.hour, p.minute, p.second);
+  }
+
+  function formatBeijingClock(date = new Date()) {
+    const p = getBeijingDateParts(date);
+    const pad = (n) => String(Number.isFinite(n) ? n : 0).padStart(2, "0");
+    return `${pad(p.hour)}:${pad(p.minute)}:${pad(p.second)}`;
+  }
+
   function formatEpochToMMDDHHmm(epochMs) {
     const n = Number(epochMs);
     if (!Number.isFinite(n)) return "";
@@ -76,6 +118,58 @@
     return null;
   }
 
+  function parseBeijingEpoch(text) {
+    const t = String(text || "").trim();
+    if (!t) return null;
+
+    if (/^\d{10,13}$/.test(t)) {
+      let n = Number(t);
+      if (!Number.isFinite(n)) return null;
+      if (t.length === 10) n *= 1000;
+      return isPlausibleTicketEpoch(n) ? n : null;
+    }
+
+    const m =
+      t.match(/(\d{4})[-/](\d{1,2})[-/](\d{1,2})[T\s]+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?/) ||
+      t.match(/(\d{4})年(\d{1,2})月(\d{1,2})日\s*(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?/);
+    if (m) {
+      if (/[zZ]|[+-]\d{2}:?\d{2}$/.test(t)) {
+        const isoTs = Date.parse(t);
+        return isPlausibleTicketEpoch(isoTs) ? isoTs : null;
+      }
+      const ts = beijingWallToEpochMs(
+        Number(m[1]),
+        Number(m[2]),
+        Number(m[3]),
+        Number(m[4]),
+        Number(m[5]),
+        m[6] ? Number(m[6]) : 0
+      );
+      return isPlausibleTicketEpoch(ts) ? ts : null;
+    }
+
+    const m2 = t.match(/^(\d{1,2})[-/](\d{1,2})\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?$/);
+    if (m2) {
+      const nowP = getBeijingDateParts();
+      const ts = beijingWallToEpochMs(
+        nowP.year,
+        Number(m2[1]),
+        Number(m2[2]),
+        Number(m2[3]),
+        Number(m2[4]),
+        m2[5] ? Number(m2[5]) : 0
+      );
+      return isPlausibleTicketEpoch(ts) ? ts : null;
+    }
+
+    if (/[zZ]|[+-]\d{2}:?\d{2}$/.test(t)) {
+      const isoTs = Date.parse(t);
+      return isPlausibleTicketEpoch(isoTs) ? isoTs : null;
+    }
+
+    return null;
+  }
+
   function resolveCreatedAtEpoch(item) {
     if (!item) return null;
     const fromField = item.createdAtEpoch;
@@ -105,8 +199,11 @@
   TD.time = {
     formatEpochToMMDDHHmm,
     formatDateTime,
+    formatBeijingClock,
+    nowBeijingEpochMs,
     isPlausibleTicketEpoch,
     parseCreatedAtEpoch,
+    parseBeijingEpoch,
     resolveCreatedAtEpoch,
     normalizeTicketCreatedFields,
     ticketEpochMs

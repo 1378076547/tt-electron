@@ -31,6 +31,7 @@
     getBatchInProgress: () => false,
     getPendingRunAfterReload: () => false,
     getPmPullInProgress: () => false,
+    getPauseOnReplyInProgress: () => false,
     isNormalizeInProgress: () => false,
     applyTicketFilters: (list) => list,
     sortTickets: (list) => list,
@@ -140,7 +141,15 @@ async function flushAutoPriorityBoostQueueIfPossible() {
     autoPriorityBoostQueued = false;
     return;
   }
-  if (deps.getBatchInProgress() || deps.getPendingRunAfterReload() || deps.getBusy() || priorityBatchInProgress || deps.isNormalizeInProgress() || deps.getPmPullInProgress())
+  if (
+    deps.getBatchInProgress() ||
+    deps.getPendingRunAfterReload() ||
+    deps.getBusy() ||
+    priorityBatchInProgress ||
+    deps.isNormalizeInProgress() ||
+    deps.getPmPullInProgress() ||
+    deps.getPauseOnReplyInProgress?.()
+  )
     return;
   autoPriorityBoostQueued = false;
   await runAutoPriorityBoostFromRefresh({ allowRunning: true, reasonTag: "自动升高-运行中" });
@@ -154,6 +163,7 @@ async function runAutoPriorityBoostFromRefresh(options = {}) {
   if (priorityBatchInProgress) return;
   if (deps.isNormalizeInProgress()) return;
   if (deps.getPmPullInProgress()) return;
+  if (deps.getPauseOnReplyInProgress?.()) return;
   if (deps.getRunning() && !allowRunning) return;
   if (!deps.getWebviewReady() || !deps.getTtWebview()) return;
 
@@ -522,6 +532,10 @@ async function applyPriorityForActiveTicket() {
   }
   if (deps.getPmPullInProgress()) {
     log("正在拉人，请稍后再设置优先级。", "warning");
+    return;
+  }
+  if (deps.getPauseOnReplyInProgress?.()) {
+    log("正在自动暂停工单，请稍后再设置优先级。", "warning");
     return;
   }
   if (deps.getRunning()) {

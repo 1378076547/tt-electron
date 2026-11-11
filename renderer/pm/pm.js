@@ -16,6 +16,7 @@
     getWebviewReady: () => false,
     getTtWebview: () => null,
     getBusy: () => false,
+    getPauseOnReplyInProgress: () => false,
     isNormalizeInProgress: () => false,
     isPriorityBatchInProgress: () => false,
     getTickets: () => [],
@@ -953,7 +954,13 @@ async function runPmPullByRegion() {
     log("工单页面加载中，请稍候…", "warning");
     return;
   }
-  const opState = { busy: deps.getBusy(), pmPullInProgress, priorityBatchInProgress: deps.isPriorityBatchInProgress(), titleNormalizeInProgress: deps.isNormalizeInProgress() };
+  const opState = {
+    busy: deps.getBusy(),
+    pmPullInProgress,
+    priorityBatchInProgress: deps.isPriorityBatchInProgress(),
+    titleNormalizeInProgress: deps.isNormalizeInProgress(),
+    pauseOnReplyInProgress: !!deps.getPauseOnReplyInProgress?.()
+  };
   if (!Guard.canStartPmPull(opState)) {
     if (pmPullInProgress) return;
     if (deps.isPriorityBatchInProgress()) {

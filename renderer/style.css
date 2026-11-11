@@ -63,6 +63,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
   padding: 10px 16px;
   background: var(--bg-panel-soft);
   border-bottom: 1px solid var(--border);
@@ -73,6 +75,12 @@ body {
   align-items: baseline;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.title-meta {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
 }
 
 .title {
@@ -89,11 +97,23 @@ body {
   letter-spacing: 0.02em;
   text-transform: none;
   color: var(--text-muted);
+  user-select: none;
+}
+
+.beijing-clock {
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  user-select: none;
+  white-space: nowrap;
 }
 
 .controls {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
 }
 
@@ -1148,6 +1168,22 @@ body {
   accent-color: #38bdf8;
 }
 
+.pause-on-reply-desc-field {
+  flex: 1 1 220px;
+}
+
+.pause-on-reply-desc-input {
+  min-width: 160px;
+  flex: 1 1 180px;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-input);
+  color: var(--text);
+  font-size: 12px;
+}
+
 .ticket-filter-input {
   flex: 1 1 170px;
   min-width: 140px;
@@ -1815,4 +1851,96 @@ body {
 }
 .api-settings-btn-secondary:hover {
   background: var(--secondary-bg-hover);
+}
+
+.easter-egg-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10001;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(2, 6, 23, 0.62);
+}
+.easter-egg-overlay[hidden] {
+  display: none !important;
+}
+.easter-egg-panel {
+  width: min(520px, calc(100vw - 32px));
+  padding: 14px 16px 12px;
+  border-radius: var(--radius-panel);
+  border: 1px solid var(--border);
+  background: linear-gradient(160deg, #0f172a 0%, var(--bg-panel) 100%);
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.55);
+  color: var(--text);
+}
+.easter-egg-hud {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  font-size: 13px;
+}
+.easter-egg-title {
+  font-weight: 700;
+  color: var(--text-strong);
+}
+.easter-egg-stat {
+  color: var(--text-muted);
+}
+.easter-egg-stat strong {
+  color: var(--accent);
+  font-weight: 700;
+}
+.easter-egg-hud-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+}
+.easter-egg-stage {
+  position: relative;
+  height: 320px;
+  overflow: hidden;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background:
+    linear-gradient(180deg, rgba(14, 165, 233, 0.08), transparent 40%),
+    #020617;
+  cursor: none;
+}
+.easter-egg-cat {
+  position: absolute;
+  bottom: 10px;
+  left: 0;
+  width: 56px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 32px;
+  line-height: 1;
+  pointer-events: none;
+  filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.45));
+}
+.easter-egg-ticket {
+  position: absolute;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(56, 189, 248, 0.45);
+  background: rgba(15, 23, 42, 0.92);
+  color: #e0f2fe;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.easter-egg-hint,
+.easter-egg-status {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.easter-egg-status {
+  min-height: 18px;
+  color: #fde68a;
 }

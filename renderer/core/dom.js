@@ -11,6 +11,8 @@
     autoSendMessageInput: document.getElementById("autoSendMessageInput"),
     titlePatrolLogInput: document.getElementById("titlePatrolLogInput"),
     titleOnNewAutoInput: document.getElementById("titleOnNewAutoInput"),
+    pauseOnReplyInput: document.getElementById("pauseOnReplyInput"),
+    pauseOnReplyDescInput: document.getElementById("pauseOnReplyDescInput"),
     startBtn: document.getElementById("startBtn"),
     logList: document.getElementById("logList"),
     ttWebview: document.getElementById("ttWebview"),

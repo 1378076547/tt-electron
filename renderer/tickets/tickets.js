@@ -75,6 +75,7 @@
     requestTitleOnNewAfterRefresh: () => {},
     requestHfIssueAfterRefresh: () => {},
     requestBurstOutbreakAfterRefresh: () => {},
+    requestPauseOnReplyAfterRefresh: () => {},
     scheduleTitlePatrolFromRefresh: () => {},
     getTitlePatrolLogEnabled: () => false,
     requestTtWebviewReload: () => false,
@@ -278,6 +279,8 @@ function mergeTicketRowFields(into, from) {
   if (from.createdAtText) into.createdAtText = from.createdAtText;
   if (from.ownerMis) into.ownerMis = from.ownerMis;
   if (from.assigneeMis) into.assigneeMis = from.assigneeMis;
+  if (from.lastReplierMisId) into.lastReplierMisId = from.lastReplierMisId;
+  if (from.lastReplyTime) into.lastReplyTime = from.lastReplyTime;
   if (from.title) into.title = from.title;
   const nid = normalizeTicketId(from.id);
   if (nid) into.id = nid;
@@ -952,6 +955,8 @@ async function refreshTickets({ reset = false, apiOnly = false, skipAutoReload =
         handler,
         ownerMis,
         assigneeMis,
+        lastReplierMisId: String(x?.lastReplierMisId || "").trim(),
+        lastReplyTime: String(x?.lastReplyTime || "").trim(),
         priorityText,
         priorityRank: pr,
         createdAtText,
@@ -1045,7 +1050,30 @@ async function refreshTickets({ reset = false, apiOnly = false, skipAutoReload =
           pickAny(api?.assignedDetail || {}, ["mis", "username", "userName"])
       ).trim();
       const assigneeMis = ownerMis;
-      return { id, title, handler, statusText, priorityText, createdAtText, ownerMis, assigneeMis, isActive: false };
+      const lastReplierMisId = String(
+        pickAny(api, ["lastReplierMisId", "lastReplierMis", "lastReplyMisId", "lastReplyMis"]) ||
+          pickAny(api?.lastReplier || {}, ["mis", "misId", "username", "userName"]) ||
+          ""
+      ).trim();
+      const lastReplyRaw = pickAny(api, ["lastReplyTime", "lastRepliedAt", "lastReplyAt"]);
+      let lastReplyTime = String(lastReplyRaw || "").trim();
+      if (lastReplyRaw != null && typeof lastReplyRaw === "number" && Number.isFinite(lastReplyRaw)) {
+        const n = lastReplyRaw < 1e12 ? lastReplyRaw * 1000 : lastReplyRaw;
+        lastReplyTime = String(n);
+      }
+      return {
+        id,
+        title,
+        handler,
+        statusText,
+        priorityText,
+        createdAtText,
+        ownerMis,
+        assigneeMis,
+        lastReplierMisId,
+        lastReplyTime,
+        isActive: false
+      };
     }
 
     let mapped = [];
@@ -1289,6 +1317,7 @@ async function refreshTickets({ reset = false, apiOnly = false, skipAutoReload =
       deps.requestHfIssueAfterRefresh();
       deps.requestBurstOutbreakAfterRefresh();
     }
+    deps.requestPauseOnReplyAfterRefresh?.();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log(`工单列表刷新失败：${TD.log.errText(err)}`, "warning");

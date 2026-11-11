@@ -32,6 +32,8 @@ const {
   autoSendMessageInput,
   titlePatrolLogInput,
   titleOnNewAutoInput,
+  pauseOnReplyInput,
+  pauseOnReplyDescInput,
   startBtn,
   logList,
   ttWebview,
@@ -475,6 +477,10 @@ function saveSettings() {
   if (ticketSlaNotifyToggle) {
     localStorage.setItem(STORAGE_KEYS.slaNotifyWindows, ticketSlaNotifyToggle.checked ? "1" : "0");
   }
+  if (pauseOnReplyInput) {
+    localStorage.setItem(STORAGE_KEYS.pauseOnReplyEnabled, pauseOnReplyInput.checked ? "1" : "0");
+  }
+  TD.pauseOnReply?.persistDesc?.();
 }
 
 function loadSettings() {
@@ -507,6 +513,13 @@ function loadSettings() {
   }
   if (ticketSlaNotifyToggle) {
     ticketSlaNotifyToggle.checked = savedSlaNotify === "1";
+  }
+  if (pauseOnReplyInput) {
+    pauseOnReplyInput.checked = localStorage.getItem(STORAGE_KEYS.pauseOnReplyEnabled) === "1";
+  }
+  if (pauseOnReplyDescInput) {
+    const savedDesc = String(localStorage.getItem(STORAGE_KEYS.pauseOnReplyDesc) || "").trim();
+    pauseOnReplyDescInput.value = savedDesc || C.PAUSE_ON_REPLY_DEFAULT_DESC;
   }
 }
 
@@ -1152,7 +1165,15 @@ function isHandledStatus(status) {
 
 function startBatchIfNeeded(reason = "定时触发") {
   if (!running || !getAutomationWebview()) return;
-  if (batchInProgress || pendingRunAfterReload || busy || isBatchInProgress() || isPullInProgress() || isNormalizeInProgress()) {
+  if (
+    batchInProgress ||
+    pendingRunAfterReload ||
+    busy ||
+    isBatchInProgress() ||
+    isPullInProgress() ||
+    isNormalizeInProgress() ||
+    TD.pauseOnReply?.isInProgress?.()
+  ) {
     return;
   }
 
@@ -1856,6 +1877,25 @@ function bindEvents() {
       log(`桌面通知${ticketSlaNotifyToggle.checked ? "已开启" : "已关闭"}`, "info");
     });
   }
+  if (pauseOnReplyInput) {
+    pauseOnReplyInput.addEventListener("change", () => {
+      saveSettings();
+      const on = !!pauseOnReplyInput.checked;
+      log(`回复后暂停${on ? "已开启" : "已关闭"}`, on ? "info" : "muted");
+      if (on) {
+        void window.ttDesktopApi?.getTtApiConfigStatus?.().then((st) => {
+          if (!st?.ok) log("回复后暂停需要先配置 API。", "warning");
+        });
+        TD.pauseOnReply?.requestPauseOnReplyAfterRefresh?.();
+      }
+    });
+  }
+  if (pauseOnReplyDescInput) {
+    pauseOnReplyDescInput.addEventListener("change", () => {
+      TD.pauseOnReply?.persistDesc?.();
+      log("暂停描述已保存。", "muted");
+    });
+  }
   if (prioritySortBtn) {
     prioritySortBtn.addEventListener("click", () => {
       togglePrioritySort();
@@ -2048,6 +2088,20 @@ async function applyAppVersionDisplay() {
   } catch {
     // ignore
   }
+}
+
+function startBeijingClock() {
+  const el = document.getElementById("beijingClock");
+  if (!el) return;
+  const paint = () => {
+    el.textContent = TD.time.formatBeijingClock();
+  };
+  const schedule = () => {
+    paint();
+    const delay = 1000 - (Date.now() % 1000);
+    window.setTimeout(schedule, delay);
+  };
+  schedule();
 }
 
 async function onTtPageLifecycle({ reset = false } = {}) {
@@ -2265,6 +2319,7 @@ function bindModuleDeps() {
     getBatchInProgress: () => batchInProgress,
     getPendingRunAfterReload: () => pendingRunAfterReload,
     getPmPullInProgress: isPullInProgress,
+    getPauseOnReplyInProgress: () => !!TD.pauseOnReply?.isInProgress?.(),
     isNormalizeInProgress,
     applyTicketFilters,
     sortTickets,
@@ -2281,6 +2336,7 @@ function bindModuleDeps() {
     getWebviewReady: () => webviewReady,
     getTtWebview: () => getAutomationWebview(),
     getBusy: () => busy,
+    getPauseOnReplyInProgress: () => !!TD.pauseOnReply?.isInProgress?.(),
     isNormalizeInProgress,
     isPriorityBatchInProgress: isBatchInProgress,
     getTickets,
@@ -2307,6 +2363,7 @@ function bindModuleDeps() {
     requestTitleOnNewAfterRefresh,
     requestHfIssueAfterRefresh,
     requestBurstOutbreakAfterRefresh,
+    requestPauseOnReplyAfterRefresh: () => TD.pauseOnReply?.requestPauseOnReplyAfterRefresh?.(),
     scheduleTitlePatrolFromRefresh,
     getTitlePatrolLogEnabled,
     getRunning: () => running,
@@ -2320,6 +2377,27 @@ function bindModuleDeps() {
       const st = await window.ttDesktopApi?.getTtApiConfigStatus?.();
       return !!st?.ok;
     }
+  });
+  TD.pauseOnReply.bind({
+    sleep,
+    getHandler,
+    getTickets,
+    applyTicketFilters,
+    handleTicketClick,
+    getWebviewReady: () => webviewReady,
+    getTtWebview: () => getAutomationWebview(),
+    ttExecuteJavaScript,
+    getBusy: () => busy,
+    getBatchInProgress: () => batchInProgress,
+    getPendingRunAfterReload: () => pendingRunAfterReload,
+    isNormalizeInProgress,
+    isPriorityBatchInProgress: isBatchInProgress,
+    getPmPullInProgress: isPullInProgress,
+    isApiConfigured: async () => {
+      const st = await window.ttDesktopApi?.getTtApiConfigStatus?.();
+      return !!st?.ok;
+    },
+    setActiveLeftTab
   });
   TD.hfIssue.bind({
     getHandler,
@@ -2363,6 +2441,7 @@ function bindModuleDeps() {
     getPendingRunAfterReload: () => pendingRunAfterReload,
     getPriorityBatchInProgress: isBatchInProgress,
     getPmPullInProgress: isPullInProgress,
+    getPauseOnReplyInProgress: () => !!TD.pauseOnReply?.isInProgress?.(),
     getTitleOnNewAutoEnabled: () => titleOnNewAutoEnabled,
     getTitlePatrolLogEnabled,
     flushAutoPriorityBoostQueueIfPossible,
@@ -2404,6 +2483,7 @@ function init() {
     });
   }
   bindEvents();
+  startBeijingClock();
   void applyAppVersionDisplay();
   void logTtApiConfigStatus().then(() => setupApiTicketPolling());
   ensureTicketElapsedTimer();

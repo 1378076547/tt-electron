@@ -11,7 +11,10 @@
       <header class="top-bar">
         <div class="title-group">
           <span class="title">TTDesktop1.0</span>
-          <span id="appVersionBadge" class="app-version-badge" aria-label="应用版本"></span>
+          <span class="title-meta">
+            <span id="appVersionBadge" class="app-version-badge" aria-label="应用版本"></span>
+            <span id="beijingClock" class="beijing-clock" title="北京时间" aria-label="北京时间">--:--:--</span>
+          </span>
         </div>
         <div class="controls">
           <span id="ticketCount" class="ticket-count">待处理：—</span>
@@ -42,6 +45,10 @@
           <label class="checkbox" title="自动检测新工单标题并修改为规范格式">
             <input id="titleOnNewAutoInput" type="checkbox" />
             <span>来单改标题</span>
+          </label>
+          <label class="checkbox" title="列表接口检测到最后回复人是当前处理人时，自动点暂停TT（需已配置 API，默认关）">
+            <input id="pauseOnReplyInput" type="checkbox" />
+            <span>回复后暂停</span>
           </label>
           <label class="start-switch" title="开启/停止自动接单">
             <input id="startBtn" type="checkbox" class="start-switch-input" aria-label="自动处理开关" />
@@ -189,6 +196,16 @@
                 <label class="ticket-filter-check" title="开启后通过桌面弹窗提醒">
                   <input id="ticketSlaNotifyToggle" type="checkbox" />
                   <span>Windows通知</span>
+                </label>
+                <label class="ticket-filter-check pause-on-reply-desc-field" title="暂停弹窗里「描述」的默认话术，可随时改">
+                  <span>暂停描述</span>
+                  <input
+                    id="pauseOnReplyDescInput"
+                    class="pause-on-reply-desc-input"
+                    type="text"
+                    maxlength="200"
+                    placeholder="等待用户回复确认并反馈。"
+                  />
                 </label>
               </div>
               <div id="ticketSlaSummary" class="ticket-sla-summary" hidden aria-live="polite"></div>
@@ -378,6 +395,25 @@
       </div>
     </div>
 
+    <div id="easterEggOverlay" class="easter-egg-overlay" hidden>
+      <div class="easter-egg-panel" role="dialog" aria-label="接单猫">
+        <div class="easter-egg-hud">
+          <span class="easter-egg-title">接单猫</span>
+          <span class="easter-egg-stat">接到 <strong id="easterEggScore">0</strong></span>
+          <span class="easter-egg-stat">漏单 <strong id="easterEggMiss">0</strong>/3</span>
+          <div class="easter-egg-hud-actions">
+            <button id="easterEggRestartBtn" class="api-settings-btn-secondary" type="button" hidden>再来</button>
+            <button id="easterEggCloseBtn" class="api-settings-btn-secondary" type="button">关闭</button>
+          </div>
+        </div>
+        <div id="easterEggStage" class="easter-egg-stage">
+          <div id="easterEggCat" class="easter-egg-cat" aria-hidden="true">🐱</div>
+        </div>
+        <p id="easterEggStatus" class="easter-egg-status">接住落下的工单</p>
+        <p class="easter-egg-hint">鼠标移动或 ← → · 空格暂停 · Esc 关闭</p>
+      </div>
+    </div>
+
     <script src="./core/constants.js"></script>
     <script src="./core/dom.js"></script>
     <script src="./core/log.js"></script>
@@ -392,9 +428,11 @@
     <script src="./pm/pm.js"></script>
     <script src="./hf-issue/hf-issue.js"></script>
     <script src="./burst-outbreak/burst-outbreak.js"></script>
+    <script src="./pause/pause-on-reply.js"></script>
     <script src="./title/title-ops.js"></script>
     <script src="./titlePatrolList.js"></script>
     <script src="./titlePrefixEngine.js"></script>
+    <script src="./easter-egg/catch-cat.js"></script>
     <script src="./renderer.js"></script>
   </body>
   </html>

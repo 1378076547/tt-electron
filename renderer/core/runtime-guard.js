@@ -1,10 +1,10 @@
 /**
  * TT 页面操作互斥（阶段 0）
- * @typedef {{ busy?: boolean, pmPullInProgress?: boolean, priorityBatchInProgress?: boolean, titleNormalizeInProgress?: boolean, running?: boolean, batchInProgress?: boolean }} GuardState
+ * @typedef {{ busy?: boolean, pmPullInProgress?: boolean, priorityBatchInProgress?: boolean, titleNormalizeInProgress?: boolean, pauseOnReplyInProgress?: boolean, running?: boolean, batchInProgress?: boolean }} GuardState
  */
 (function initGuard(TD) {
   function isWebviewOpLocked(s) {
-    return !!(s.busy || s.pmPullInProgress || s.priorityBatchInProgress || s.titleNormalizeInProgress);
+    return !!(s.busy || s.pmPullInProgress || s.priorityBatchInProgress || s.titleNormalizeInProgress || s.pauseOnReplyInProgress);
   }
 
   TD.guard = {
@@ -19,6 +19,7 @@
       if (s.busy) return false;
       if (s.priorityBatchInProgress) return false;
       if (s.titleNormalizeInProgress) return false;
+      if (s.pauseOnReplyInProgress) return false;
       return true;
     },
 
@@ -26,6 +27,7 @@
       if (s.priorityBatchInProgress) return false;
       if (s.titleNormalizeInProgress) return false;
       if (s.pmPullInProgress) return false;
+      if (s.pauseOnReplyInProgress) return false;
       return true;
     },
 
@@ -33,6 +35,7 @@
       if (s.titleNormalizeInProgress) return false;
       if (s.priorityBatchInProgress) return false;
       if (s.pmPullInProgress) return false;
+      if (s.pauseOnReplyInProgress) return false;
       return true;
     },
 
